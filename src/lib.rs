@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use tokio::runtime::Runtime;
-use chrono::{Utc, NaiveDateTime, TimeZone};
+use chrono::Utc;
 use ethers::{abi::Abi, contract::Contract, providers:: { Http, Middleware, Provider}, types::Address};
 use ethers::core::types::U256;
 use serde::Serialize;
@@ -209,21 +209,21 @@ impl BlockchainClient {
         }
     }
 
-    fn get_block_number_range(&self, _py: Python, start_datetime: &str, end_datetime: &str) -> (u64, u64) {
+    fn get_block_number_range(&self, _py: Python, start_timestamp: u64, end_timestamp: u64) -> (u64, u64) {
         let rt = Runtime::new().unwrap();
-        let result = rt.block_on(get_block_number_range(self.provider.clone(), start_datetime, end_datetime)).unwrap();
+        let result = rt.block_on(get_block_number_range(self.provider.clone(), start_timestamp, end_timestamp)).unwrap();
         (result.0.as_u64(), result.1.as_u64())
     }
 
-    fn fetch_pool_data(&self, py: Python, token_pairs: Vec<(String, String, u32)>, start_datetime: String, end_datetime: String, interval: String) -> PyResult<PyObject> {
+    fn fetch_pool_data(&self, py: Python, token_pairs: Vec<(String, String, u32)>, start_timestamp: u64, end_timestamp: u64) -> PyResult<PyObject> {
         let rt = Runtime::new().unwrap();
-        match rt.block_on(fetch_pool_data(self.provider.clone(), self.block_cache.clone(), token_pairs, &start_datetime, &end_datetime, &interval)) {
+        match rt.block_on(fetch_pool_data(self.provider.clone(), self.block_cache.clone(), token_pairs, start_timestamp, end_timestamp)) {
             Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
             Err(e) => return Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
         }
     }
 
-    fn get_pool_created_events_between_two_timestamps(&self, py: Python, start_timestamp: &str, end_timestamp: &str) -> PyResult<PyObject> {
+    fn get_pool_created_events_between_two_timestamps(&self, py: Python, start_timestamp: u64, end_timestamp: u64) -> PyResult<PyObject> {
         let rt = Runtime::new().unwrap();
         match rt.block_on(get_pool_created_events_between_two_timestamps(self.provider.clone(), Address::from_str(FACTORY_ADDRESS).unwrap(), start_timestamp, end_timestamp)) {
             Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
@@ -344,28 +344,19 @@ async fn get_pool_events_by_token_pairs(
 }
 
 
-async fn get_block_number_range(provider:Arc::<Provider<Http>>, start_datetime: &str, end_datetime: &str) -> Result<(U64, U64), Box<dyn std::error::Error + Send + Sync>>{
-    let first_naive_datetime = NaiveDateTime::parse_from_str(start_datetime, "%Y-%m-%d %H:%M:%S")
-        .expect("Failed to parse date");
-    let first_datetime_utc = Utc.from_utc_datetime(&first_naive_datetime);
-    let first_timestamp = first_datetime_utc.timestamp() as u64;
-
-    let second_naive_datetime = NaiveDateTime::parse_from_str(end_datetime, "%Y-%m-%d %H:%M:%S")
-        .expect("Failed to parse date");
-    let second_datetime_utc = Utc.from_utc_datetime(&second_naive_datetime);
-    let second_timestamp = second_datetime_utc.timestamp() as u64;
-
+async fn get_block_number_range(provider:Arc::<Provider<Http>>, start_timestamp: u64 , end_timestamp: u64) -> Result<(U64, U64), Box<dyn std::error::Error + Send + Sync>>{
+    
     // Check if the given date time is more than the current date time
     let current_timestamp = Utc::now().timestamp() as u64;
-    if first_timestamp > current_timestamp {
+    if start_timestamp > current_timestamp {
         return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Given date time is in the future")));
     }
 
     // let block_number = provider.get_block_number().await?;
     let average_block_time = get_average_block_time(provider.clone()).await?;
 
-    let start_block_number = get_block_number_from_timestamp(provider.clone(), first_timestamp, average_block_time).await?;
-    let end_block_number = start_block_number + (second_timestamp - first_timestamp) / average_block_time;
+    let start_block_number = get_block_number_from_timestamp(provider.clone(), start_timestamp, average_block_time).await?;
+    let end_block_number = start_block_number + (end_timestamp - start_timestamp) / average_block_time;
 
     Ok((start_block_number, end_block_number))
 }
@@ -440,9 +431,9 @@ async fn get_block_number_from_timestamp(
     Ok(low)
 }
 
-async fn fetch_pool_data(provider: Arc::<Provider<Http>>, block_cache: Arc<Mutex<HashMap<u64, u64>>>, token_pairs: Vec<(String, String, u32)>, start_datetime: &str, end_datetime: &str, _interval: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+async fn fetch_pool_data(provider: Arc::<Provider<Http>>, block_cache: Arc<Mutex<HashMap<u64, u64>>>, token_pairs: Vec<(String, String, u32)>, start_timestamp: u64, end_timestamp: u64) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     // let date_str = "2024-09-27 19:34:56";
-    let (from_block, to_block) = get_block_number_range(provider.clone(), start_datetime, end_datetime).await?;
+    let (from_block, to_block) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
 
     let pool_events = get_pool_events_by_token_pairs(provider.clone(), block_cache.clone(), token_pairs, from_block, to_block,).await?;
     Ok(pool_events)
@@ -451,8 +442,8 @@ async fn fetch_pool_data(provider: Arc::<Provider<Http>>, block_cache: Arc<Mutex
 async fn get_pool_created_events_between_two_timestamps(
     provider: Arc<Provider<Http>>,
     factory_address: Address,
-    start_timestamp: &str,
-    end_timestamp: &str,
+    start_timestamp: u64,
+    end_timestamp: u64,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
 
@@ -497,6 +488,7 @@ fn pool_data_fetcher(_py: Python, m: &PyModule) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{NaiveDateTime, Utc, TimeZone};
 
     #[tokio::test]
     async fn test_fetch_pool_data() {
@@ -504,15 +496,24 @@ mod tests {
         let token1 = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
         let start_datetime = "2024-10-11 10:34:56";
         let end_datetime = "2024-10-11 12:35:56";
-        let interval = "1h";
         let rpc_url = "http://localhost:8545";
         let fee = 3000;
+
+        let first_naive_datetime = NaiveDateTime::parse_from_str(start_datetime, "%Y-%m-%d %H:%M:%S")
+            .expect("Failed to parse date");
+        let first_datetime_utc = Utc.from_utc_datetime(&first_naive_datetime);
+        let first_timestamp = first_datetime_utc.timestamp() as u64;
+
+        let second_naive_datetime = NaiveDateTime::parse_from_str(end_datetime, "%Y-%m-%d %H:%M:%S")
+            .expect("Failed to parse date");
+        let second_datetime_utc = Utc.from_utc_datetime(&second_naive_datetime);
+        let second_timestamp = second_datetime_utc.timestamp() as u64;
 
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
         let block_cache = Arc::new(Mutex::new(HashMap::new()));
         let token_pairs = vec![(token0.to_string(), token1.to_string(), fee)];
 
-        let __result = fetch_pool_data(provider, block_cache, token_pairs, start_datetime, end_datetime, interval).await;
+        let __result = fetch_pool_data(provider, block_cache, token_pairs, first_timestamp, second_timestamp).await;
         assert!(__result.is_ok());
     }
 }
