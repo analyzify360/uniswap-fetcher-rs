@@ -1,7 +1,15 @@
 [package]
 name = "uniswap_fetcher_rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+authors = ["venus1004@proton.me"]
+description = "A Rust-based library to fetch and decode Uniswap V3 pool events, designed to be used as a Python module."
+license = "MIT"
+repository = "https://github.com/nestlest/uniswap-fetcher-rs"
+homepage = "https://github.com/nestlest/uniswap-fetcher-rs"
+readme = "README.md"
+keywords = ["uniswap", "ethereum", "rust", "python", "pyo3"]
+categories = ["cryptocurrency", "data-processing"]
 
 [dependencies]
 ethers = "2.0.14"
@@ -26,4 +34,5 @@ crate-type = ["cdylib"]
 version = "0.10.0"
 
 [package.metadata.maturin]
+name = "uniswap_fetcher_rs"
 python-versions = ">=3.10 < 4.0"
