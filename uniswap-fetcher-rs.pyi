@@ -35,7 +35,7 @@ class UniswapFetcher:
         end_timestamp: int
     ) -> Tuple[int, int]:
         """
-        Get block number range for the given datetime range.
+        Get block number range for the given timestamp range.
 
         Args:
             start_timestamp (int): Starting timestamp.
