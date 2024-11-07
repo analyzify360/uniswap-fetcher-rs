@@ -1,5 +1,5 @@
 [package]
-name = "uniswap-fetcher-rs"
+name = "uniswap_fetcher_rs"
 version = "0.1.0"
 edition = "2021"
 

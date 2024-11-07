@@ -1,9 +1,9 @@
 from typing import List, Tuple, Dict, Any
 
-class BlockchainClient:
+class UniswapFetcher:
     def __init__(self, rpc_url: str) -> None:
         """
-        Initialize the BlockchainClient.
+        Initialize the UniswapFetcher.
 
         Args:
             rpc_url (str): The RPC URL of the Ethereum node.

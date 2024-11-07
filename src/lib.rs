@@ -187,18 +187,18 @@ struct PoolCreatedEvent {
 
 
 #[pyclass]
-pub struct BlockchainClient {
+pub struct UniswapFetcher {
     provider: Arc<Provider<Http>>,
     block_cache: Arc<Mutex<HashMap<u64, u64>>>,
 }
 
 #[pymethods]
-impl BlockchainClient {
+impl UniswapFetcher {
     #[new]
     fn new(rpc_url: String) -> Self {
         let provider: Arc<Provider<Http>> = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
         let block_cache: Arc<Mutex<HashMap<u64, u64>>> = Arc::new(Mutex::new(HashMap::new()));
-        BlockchainClient { provider, block_cache }
+        UniswapFetcher { provider, block_cache }
     }
 
     fn get_pool_events_by_token_pairs(&self, py: Python, token_pairs: Vec<(String, String, u32)> , from_block: u64, to_block: u64) -> PyResult<PyObject> {
@@ -479,8 +479,8 @@ async fn get_pool_created_events_between_two_timestamps(
 }
 
 #[pymodule]
-fn pool_data_fetcher(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_class::<BlockchainClient>()?;
+fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<UniswapFetcher>()?;
     Ok(())
 }
 
