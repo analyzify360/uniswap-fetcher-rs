@@ -4806,6 +4806,7 @@ dependencies = [
  "ethers-abi",
  "futures",
  "maturin",
+ "num-bigint",
  "pyo3",
  "reqwest 0.12.9",
  "serde",
