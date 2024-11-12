@@ -531,7 +531,8 @@ async fn get_signals_by_pool_address(
         match event_type {
             "swap" => {
                 let swap_event: SwapEvent = serde_json::from_value(event_data)?;
-                price = price + ( swap_event.sqrt_price_x96 / 2u128.pow(96) ).as_u128() as f64;
+                let sqrt_price = ( swap_event.sqrt_price_x96 / 2u128.pow(96) ).as_u128() as f64;
+                price = price + sqrt_price * sqrt_price;
                 swap_event_count = swap_event_count + 1;
                 volume = volume + swap_event.amount0.abs() + swap_event.amount1.abs();
             },
