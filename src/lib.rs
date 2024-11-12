@@ -562,4 +562,106 @@ fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
 }
 
 // implement test logic
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{NaiveDateTime, Utc, TimeZone};
 
+    #[tokio::test]
+    async fn test_fetch_pool_data() {
+        let token0 = "0xaea46a60368a7bd060eec7df8cba43b7ef41ad85";
+        let token1 = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+        let start_datetime = "2024-10-11 10:34:56";
+        let end_datetime = "2024-10-11 12:35:56";
+        let rpc_url = "http://localhost:8545";
+        let fee = 3000;
+
+        let first_naive_datetime = NaiveDateTime::parse_from_str(start_datetime, "%Y-%m-%d %H:%M:%S")
+            .expect("Failed to parse date");
+        let first_datetime_utc = Utc.from_utc_datetime(&first_naive_datetime);
+        let first_timestamp = first_datetime_utc.timestamp() as u64;
+
+        let second_naive_datetime = NaiveDateTime::parse_from_str(end_datetime, "%Y-%m-%d %H:%M:%S")
+            .expect("Failed to parse date");
+        let second_datetime_utc = Utc.from_utc_datetime(&second_naive_datetime);
+        let second_timestamp = second_datetime_utc.timestamp() as u64;
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+        let block_cache = Arc::new(Mutex::new(HashMap::new()));
+        let token_pairs = vec![(token0.to_string(), token1.to_string(), fee)];
+
+        let result = fetch_pool_data(provider, block_cache, token_pairs, first_timestamp, second_timestamp).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_pool_events_by_token_pairs() {
+        let token0 = "0xaea46a60368a7bd060eec7df8cba43b7ef41ad85";
+        let token1 = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+        let from_block = 12345678;
+        let to_block = 12345778;
+        let rpc_url = "http://localhost:8545";
+        let fee = 3000;
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+        let block_cache = Arc::new(Mutex::new(HashMap::new()));
+        let token_pairs = vec![(token0.to_string(), token1.to_string(), fee)];
+
+        let result = get_pool_events_by_token_pairs(provider, block_cache, token_pairs, U64::from(from_block), U64::from(to_block)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_pool_events_by_pool_addresses() {
+        let pool_addresses = vec!["0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8"];
+        let from_block = 12345678;
+        let to_block = 12345778;
+        let rpc_url = "http://localhost:8545";
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+        let block_cache = Arc::new(Mutex::new(HashMap::new()));
+        let pool_addresses: Vec<Address> = pool_addresses.iter().map(|address| Address::from_str(address).unwrap()).collect();
+
+        let result = get_pool_events_by_pool_addresses(provider, block_cache, pool_addresses, U64::from(from_block), U64::from(to_block)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_signals_by_pool_address() {
+        let pool_address = "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8";
+        let timestamp = 1633046400; // 2021-10-01 00:00:00 UTC
+        let interval = 300; // 1 day in seconds
+        let rpc_url = "http://localhost:8545";
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+        let pool_address = Address::from_str(pool_address).unwrap();
+
+        let result = get_signals_by_pool_address(provider, pool_address, timestamp, interval).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_block_number_range() {
+        let start_timestamp = 1633046400; // 2021-10-01 00:00:00 UTC
+        let end_timestamp = 1633132800; // 2021-10-02 00:00:00 UTC
+        let rpc_url = "http://localhost:8545";
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+
+        let result = get_block_number_range(provider, start_timestamp, end_timestamp).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_pool_created_events_between_two_timestamps() {
+        let start_timestamp = 1633046400; // 2021-10-01 00:00:00 UTC
+        let end_timestamp = 1633132800; // 2021-10-02 00:00:00 UTC
+        let rpc_url = "http://localhost:8545";
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+        let factory_address = Address::from_str(FACTORY_ADDRESS).unwrap();
+
+        let result = get_pool_created_events_between_two_timestamps(provider, factory_address, start_timestamp, end_timestamp).await;
+        assert!(result.is_ok());
+    }
+}
