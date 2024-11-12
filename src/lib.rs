@@ -209,6 +209,14 @@ impl UniswapFetcher {
         }
     }
 
+    fn get_pool_events_by_pool_addresses(&self, py: Python, pool_addresses: Vec<String>, from_block: u64, to_block: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_pool_events_by_pool_addresses(self.provider.clone(), self.block_cache.clone(), pool_addresses.iter().map(|address| Address::from_str(address).unwrap()).collect(), U64::from(from_block), U64::from(to_block))) {
+            Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
     fn get_block_number_range(&self, _py: Python, start_timestamp: u64, end_timestamp: u64) -> (u64, u64) {
         let rt = Runtime::new().unwrap();
         let result = rt.block_on(get_block_number_range(self.provider.clone(), start_timestamp, end_timestamp)).unwrap();
@@ -248,12 +256,13 @@ async fn get_pool_address(provider: Arc<Provider<Http>>, factory_address: Addres
 }
 
 
-async fn get_pool_events_by_pool_address(
+async fn get_pool_events_by_pool_addresses(
     provider: Arc<Provider<Http>>,
+    block_cache: Arc<Mutex<HashMap<u64, u64>>>,
     pool_addresses: Vec<H160>,
     from_block: U64,
     to_block: U64
-) -> Result<Vec<Log>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let filter = Filter::new()
         .address(pool_addresses)
         .from_block(from_block)
@@ -266,8 +275,8 @@ async fn get_pool_events_by_pool_address(
         ]);
     println!("from_block: {:?}, to_block: {:?}", from_block, to_block);
     let logs = provider.get_logs(&filter).await?;
-    
-    Ok(logs)
+    let events = serialize_logs(logs, provider.clone(), block_cache.clone()).await?;
+    Ok(events)
 }
 
 async fn get_pool_events_by_token_pairs(
@@ -303,8 +312,12 @@ async fn get_pool_events_by_token_pairs(
 
     println!("Fetched pool address: {:?}", pool_addresses);
 
-    let logs = get_pool_events_by_pool_address(provider.clone(), pool_addresses, from_block, to_block).await?;
+    let events = get_pool_events_by_pool_addresses(provider.clone(), block_cache.clone(), pool_addresses, from_block, to_block).await?;
+    Ok(events)
     
+}
+
+async fn serialize_logs(logs: Vec<Log>, provider: Arc::<Provider<Http>>, block_cache: Arc<Mutex<HashMap<u64, u64>>>) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let mut data = Vec::new();
     for log in logs {
         match decode_uniswap_event(&log) {
@@ -342,7 +355,6 @@ async fn get_pool_events_by_token_pairs(
     let overall_data_hash = format!("{:x}", hasher.finalize());
     Ok(serde_json::json!({ "data": data, "overall_data_hash": overall_data_hash }))
 }
-
 
 async fn get_block_number_range(provider:Arc::<Provider<Http>>, start_timestamp: u64 , end_timestamp: u64) -> Result<(U64, U64), Box<dyn std::error::Error + Send + Sync>>{
     
