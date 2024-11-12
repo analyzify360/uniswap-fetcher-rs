@@ -2,13 +2,12 @@ use pyo3::prelude::*;
 use tokio::runtime::Runtime;
 use chrono::Utc;
 use ethers::{abi::Abi, contract::Contract, providers:: { Http, Middleware, Provider}, types::Address};
-use ethers::core::types::U256;
-use serde::Serialize;
-use sha2::{Sha256, Digest};
+use serde::{Deserialize, Serialize};
+use sha2::{ Digest, Sha256};
 use std::sync::Arc;
 use serde_json::{self, Value};
 use std::marker::Send;
-use ethers::types::{Filter, Log, H160, H256, U64, I256, Block, BlockNumber};
+use ethers::types::{Filter, Log, H160, H256, U64, I256, U256, Block, BlockNumber};
 use ethers::abi::RawLog;
 use ethers::contract::EthLogDecode;
 use ethers::contract::EthEvent;
@@ -19,6 +18,8 @@ use std::str::FromStr;
 use pyo3::{IntoPy, PyObject};
 use pyo3::types::{PyList, PyDict};
 use futures::{future::join_all, lock::Mutex};
+
+use num_bigint::BigInt;
 
 const NUM_BLOCKS: u64 = 100; // Number of blocks to consider for average block time calculation
 const FACTORY_ADDRESS: &str = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
@@ -55,7 +56,7 @@ impl IntoPy<PyObject> for PyValue {
     }
 }
 
-#[derive(Debug, EthEvent, Serialize)]
+#[derive(Debug, EthEvent, Serialize, Deserialize)]
 #[ethevent(name = "Swap", abi = "Swap(address indexed sender, address indexed to, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)")]
 struct SwapEvent {
     sender: Address,
@@ -67,7 +68,7 @@ struct SwapEvent {
     tick: i32,  // ABI's int24 can fit in i32 in Rust
 }
 
-#[derive(Debug, EthEvent, Serialize)]
+#[derive(Debug, EthEvent, Serialize, Deserialize)]
 #[ethevent(name = "Mint", abi = "Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)")]
 struct MintEvent {
     sender: Address,
@@ -79,7 +80,7 @@ struct MintEvent {
     amount1: U256,
 }
 
-#[derive(Debug, EthEvent, Serialize)]
+#[derive(Debug, EthEvent, Serialize, Deserialize)]
 #[ethevent(name = "Burn", abi = "Burn(address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)")]
 struct BurnEvent {
     owner: Address,
@@ -213,6 +214,14 @@ impl UniswapFetcher {
         let rt = Runtime::new().unwrap();
         match rt.block_on(get_pool_events_by_pool_addresses(self.provider.clone(), self.block_cache.clone(), pool_addresses.iter().map(|address| Address::from_str(address).unwrap()).collect(), U64::from(from_block), U64::from(to_block))) {
             Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    fn get_signals_by_pool_address(&self, py: Python, pool_address: String, timestamp: u64, interval: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_signals_by_pool_address(self.provider.clone(), Address::from_str(&pool_address).unwrap(), timestamp, interval)) {
+            Ok(result) => Ok(PyValue(result).into_py(py)),
             Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
         }
     }
@@ -490,6 +499,62 @@ async fn get_pool_created_events_between_two_timestamps(
     Ok(pool_created_events)
 }
 
+async fn get_signals_by_pool_address(
+    provider: Arc<Provider<Http>>,
+    pool_address: Address,
+    timestamp: u64,
+    interval: u64,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let average_block_time = get_average_block_time(provider.clone()).await?;
+    let start_block_number = get_block_number_from_timestamp(provider.clone(), timestamp, average_block_time).await?;
+    let end_block_number = start_block_number + interval as u64;
+    let filter = Filter::new()
+        .address(pool_address)
+        .from_block(start_block_number)
+        .to_block(end_block_number)
+        .topic0(vec![
+            H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
+            H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
+            H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
+        ]);
+
+    let logs = provider.get_logs(&filter).await?;
+    let events = serialize_logs(logs, provider.clone(), Arc::new(Mutex::new(HashMap::new()))).await?;
+    let data = events["data"].as_array().unwrap();
+    let mut price: f64 = 0.0;
+    let mut volume: I256 = I256::from(0);
+    let mut liquidity: BigInt = BigInt::from(0);
+    let mut swap_event_count: i32 = 0;
+    for event in data {
+        let event_type = event["event"]["type"].as_str().unwrap();
+        let event_data = event["event"]["data"].clone();
+        match event_type {
+            "swap" => {
+                let swap_event: SwapEvent = serde_json::from_value(event_data)?;
+                price = price + ( swap_event.sqrt_price_x96 / 2u128.pow(96) ).as_u128() as f64;
+                swap_event_count = swap_event_count + 1;
+                volume = volume + swap_event.amount0.abs() + swap_event.amount1.abs();
+            },
+            "mint" => {
+                let mint_event: MintEvent = serde_json::from_value(event_data)?;
+                liquidity = liquidity + BigInt::parse_bytes(mint_event.amount.to_string().as_bytes(), 10).unwrap();
+            },
+            "burn" => {
+                let burn_event: BurnEvent = serde_json::from_value(event_data)?;
+                liquidity = liquidity - BigInt::parse_bytes(burn_event.amount.to_string().as_bytes(), 10).unwrap();
+            },
+            _ => (),
+        }
+    }
+    price = price / swap_event_count as f64;
+    let signals = serde_json::json!({
+        "price": price.to_string(),
+        "volume": volume.to_string(),
+        "liquidity": liquidity.to_string(),
+    });
+    Ok(signals)
+}
+
 #[pymodule]
 fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<UniswapFetcher>()?;
@@ -497,35 +562,4 @@ fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
 }
 
 // implement test logic
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::{NaiveDateTime, Utc, TimeZone};
 
-    #[tokio::test]
-    async fn test_fetch_pool_data() {
-        let token0 = "0xaea46a60368a7bd060eec7df8cba43b7ef41ad85";
-        let token1 = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-        let start_datetime = "2024-10-11 10:34:56";
-        let end_datetime = "2024-10-11 12:35:56";
-        let rpc_url = "http://localhost:8545";
-        let fee = 3000;
-
-        let first_naive_datetime = NaiveDateTime::parse_from_str(start_datetime, "%Y-%m-%d %H:%M:%S")
-            .expect("Failed to parse date");
-        let first_datetime_utc = Utc.from_utc_datetime(&first_naive_datetime);
-        let first_timestamp = first_datetime_utc.timestamp() as u64;
-
-        let second_naive_datetime = NaiveDateTime::parse_from_str(end_datetime, "%Y-%m-%d %H:%M:%S")
-            .expect("Failed to parse date");
-        let second_datetime_utc = Utc.from_utc_datetime(&second_naive_datetime);
-        let second_timestamp = second_datetime_utc.timestamp() as u64;
-
-        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
-        let block_cache = Arc::new(Mutex::new(HashMap::new()));
-        let token_pairs = vec![(token0.to_string(), token1.to_string(), fee)];
-
-        let __result = fetch_pool_data(provider, block_cache, token_pairs, first_timestamp, second_timestamp).await;
-        assert!(__result.is_ok());
-    }
-}
