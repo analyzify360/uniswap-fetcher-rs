@@ -485,6 +485,7 @@ async fn get_pool_created_events_between_two_timestamps(
 
         if log.topics[0] == H256::from_str(POOL_CREATED_SIGNATURE).unwrap() {
             let pool_created_event = <PoolCreatedEvent as EthLogDecode>::decode_log(&raw_log)?;
+            
             pool_created_events.push(serde_json::json!({
                 "token0": pool_created_event.token0,
                 "token1": pool_created_event.token1,
@@ -556,6 +557,17 @@ async fn get_signals_by_pool_address(
     Ok(signals)
 }
 
+async fn get_token_info(provider: Arc<Provider<Http>>, token_address: Address) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+    let abi_json = include_str!("contracts/erc20_abi.json");
+    let abi: Abi = serde_json::from_str(abi_json)?;
+
+    let token = Contract::new(token_address, abi, provider.clone());
+    let name: String = token.method::<(), String>("name", ())?.call().await?;
+    let symbol: String = token.method::<(), String>("symbol", ())?.call().await?;
+
+    Ok((name, symbol))
+}
+
 #[pymodule]
 fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<UniswapFetcher>()?;
@@ -565,6 +577,7 @@ fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
 // implement test logic
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use chrono::{NaiveDateTime, Utc, TimeZone};
 
@@ -664,5 +677,13 @@ mod tests {
 
         let result = get_pool_created_events_between_two_timestamps(provider, factory_address, start_timestamp, end_timestamp).await;
         assert!(result.is_ok());
+    }
+    #[tokio::test]
+    async fn test_get_token_info() {
+        let token_address = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+        let rpc_url = "http://localhost:8545";
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+        let result = get_token_info(provider.clone(), Address::from_str(token_address).unwrap()).await.unwrap();
+        assert!(result.1 == "WETH" );
     }
 }
