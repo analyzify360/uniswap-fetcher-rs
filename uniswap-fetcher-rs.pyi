@@ -102,3 +102,23 @@ class UniswapFetcher:
             ["price": str, "volume": str, "liquidity": str]
         """
         ...
+    
+            
+    def get_pool_events_by_pool_addresses(
+        self,
+        pool_addresses: List[str],
+        from_block: int,
+        to_block: int
+    ) -> Dict:
+        """
+        Get pool events by pool addresses.
+
+        Args:
+            pool_addresses (List[str]): List of pool addresses.
+            from_block (int): Starting block number.
+            to_block (int): Ending block number.
+
+        Returns:
+            Dict: JSON object containing the pool events.
+        """
+        ...
