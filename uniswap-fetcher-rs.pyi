@@ -82,3 +82,23 @@ class UniswapFetcher:
         
         """
         ...
+        
+    def get_signals_by_pool_address(
+        self,
+        pool_address: str,
+        timestamp: int,
+        interval: int
+    ) -> Dict:
+        """
+        Get signals by pool address.
+
+        Args:
+            pool_address (str): Pool address.
+            timestamp (int): Timestamp.
+            interval (int): Interval.
+
+        Returns:
+            Dict: JSON object containing the signals.
+            ["price": str, "volume": str, "liquidity": str]
+        """
+        ...
