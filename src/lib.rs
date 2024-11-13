@@ -5,7 +5,7 @@ use ethers::{abi::Abi, contract::Contract, providers:: { Http, Middleware, Provi
 use serde::{Deserialize, Serialize};
 use sha2::{ Digest, Sha256};
 use std::sync::Arc;
-use serde_json::{self, Value};
+use serde_json::{self, Number, Value};
 use std::marker::Send;
 use ethers::types::{Filter, Log, H160, H256, U64, I256, U256, Block, BlockNumber};
 use ethers::abi::RawLog;
@@ -191,6 +191,7 @@ struct PoolCreatedEvent {
 pub struct UniswapFetcher {
     provider: Arc<Provider<Http>>,
     block_cache: Arc<Mutex<HashMap<u64, u64>>>,
+    token_info_cache: Arc<Mutex<HashMap<Address, (String, String, Number)>>>,
 }
 
 #[pymethods]
@@ -199,7 +200,8 @@ impl UniswapFetcher {
     fn new(rpc_url: String) -> Self {
         let provider: Arc<Provider<Http>> = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
         let block_cache: Arc<Mutex<HashMap<u64, u64>>> = Arc::new(Mutex::new(HashMap::new()));
-        UniswapFetcher { provider, block_cache }
+        let token_info_cache: Arc<Mutex<HashMap<Address, (String, String, Number)>>> = Arc::new(Mutex::new(HashMap::new()));
+        UniswapFetcher { provider, block_cache, token_info_cache }
     }
 
     fn get_pool_events_by_token_pairs(&self, py: Python, token_pairs: Vec<(String, String, u32)> , from_block: u64, to_block: u64) -> PyResult<PyObject> {
@@ -242,7 +244,7 @@ impl UniswapFetcher {
 
     fn get_pool_created_events_between_two_timestamps(&self, py: Python, start_timestamp: u64, end_timestamp: u64) -> PyResult<PyObject> {
         let rt = Runtime::new().unwrap();
-        match rt.block_on(get_pool_created_events_between_two_timestamps(self.provider.clone(), Address::from_str(FACTORY_ADDRESS).unwrap(), start_timestamp, end_timestamp)) {
+        match rt.block_on(get_pool_created_events_between_two_timestamps(self.provider.clone(), self.token_info_cache.clone(), Address::from_str(FACTORY_ADDRESS).unwrap(), start_timestamp, end_timestamp)) {
             Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
             Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
         }
@@ -462,6 +464,7 @@ async fn fetch_pool_data(provider: Arc::<Provider<Http>>, block_cache: Arc<Mutex
 
 async fn get_pool_created_events_between_two_timestamps(
     provider: Arc<Provider<Http>>,
+    token_info_cache: Arc<Mutex<HashMap<Address, (String, String, Number)>>>,
     factory_address: Address,
     start_timestamp: u64,
     end_timestamp: u64,
@@ -485,12 +488,42 @@ async fn get_pool_created_events_between_two_timestamps(
 
         if log.topics[0] == H256::from_str(POOL_CREATED_SIGNATURE).unwrap() {
             let pool_created_event = <PoolCreatedEvent as EthLogDecode>::decode_log(&raw_log)?;
+            let token0_info = {
+                let mut cache = token_info_cache.lock().await;
+                if let Some(cached_token_info) = cache.get(&pool_created_event.token0) {
+                    cached_token_info.clone()
+                } else {
+                    let token_info = get_token_info(provider.clone(), pool_created_event.token0).await.unwrap_or_else(|_| ("".to_string(), "".to_string(), 0.into()));
+                    cache.insert(pool_created_event.token0, token_info.clone());
+                    token_info
+                }
+            };
+            let token1_info = {
+                let mut cache = token_info_cache.lock().await;
+                if let Some(cached_token_info) = cache.get(&pool_created_event.token1) {
+                    cached_token_info.clone()
+                } else {
+                    let token_info = get_token_info(provider.clone(), pool_created_event.token1).await.unwrap_or_else(|_| ("".to_string(), "".to_string(), 0.into()));
+                    cache.insert(pool_created_event.token1, token_info.clone());
+                    token_info
+                }
+            };
             pool_created_events.push(serde_json::json!({
-                "token0": pool_created_event.token0,
-                "token1": pool_created_event.token1,
+                "token0": {
+                    "address": pool_created_event.token0,
+                    "name": token0_info.0,
+                    "symbol": token0_info.1,
+                    "decimals": token0_info.2,
+                },
+                "token1": {
+                    "address": pool_created_event.token1,
+                    "name": token1_info.0,
+                    "symbol": token1_info.1,
+                    "decimals": token1_info.2,
+                },
                 "fee": pool_created_event.fee,
                 "tick_spacing": pool_created_event.tick_spacing,
-                "pool": pool_created_event.pool,
+                "pool_address": pool_created_event.pool,
                 "block_number": log.block_number.unwrap().as_u64(),
             }));
         }
@@ -556,6 +589,18 @@ async fn get_signals_by_pool_address(
     Ok(signals)
 }
 
+async fn get_token_info(provider: Arc<Provider<Http>>, token_address: Address) -> Result<(String, String, Number), Box<dyn std::error::Error + Send + Sync>> {
+    let abi_json = include_str!("contracts/erc20_abi.json");
+    let abi: Abi = serde_json::from_str(abi_json)?;
+
+    let token = Contract::new(token_address, abi, provider.clone());
+    let name: String = token.method::<(), String>("name", ())?.call().await?;
+    let symbol: String = token.method::<(), String>("symbol", ())?.call().await?;
+    let decimals: u8 = token.method::<(), u8>("decimals", ())?.call().await?;
+
+    Ok((name, symbol, decimals.into()))
+}
+
 #[pymodule]
 fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<UniswapFetcher>()?;
@@ -565,6 +610,7 @@ fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
 // implement test logic
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use chrono::{NaiveDateTime, Utc, TimeZone};
 
@@ -661,8 +707,17 @@ mod tests {
 
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
         let factory_address = Address::from_str(FACTORY_ADDRESS).unwrap();
+        let token_info_cache = Arc::new(Mutex::new(HashMap::new()));
 
-        let result = get_pool_created_events_between_two_timestamps(provider, factory_address, start_timestamp, end_timestamp).await;
+        let result = get_pool_created_events_between_two_timestamps(provider, token_info_cache.clone(), factory_address, start_timestamp, end_timestamp).await;
         assert!(result.is_ok());
+    }
+    #[tokio::test]
+    async fn test_get_token_info() {
+        let token_address = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+        let rpc_url = "http://localhost:8545";
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+        let result = get_token_info(provider.clone(), Address::from_str(token_address).unwrap()).await.unwrap();
+        assert!(result.1 == "WETH" );
     }
 }
