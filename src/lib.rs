@@ -523,7 +523,7 @@ async fn get_pool_created_events_between_two_timestamps(
                 },
                 "fee": pool_created_event.fee,
                 "tick_spacing": pool_created_event.tick_spacing,
-                "pool": pool_created_event.pool,
+                "pool_address": pool_created_event.pool,
                 "block_number": log.block_number.unwrap().as_u64(),
             }));
         }
