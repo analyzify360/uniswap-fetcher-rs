@@ -79,7 +79,7 @@ class UniswapFetcher:
         
         Returns:
             Dict: JSON object containing the pool created events.
-        
+            ["token0": {"address": str, "name": str, "symbol": str, "decimals": int}, "token1": {"address": str, "name": str, "symbol": str, "decimals": int}, "pool_address": str, "block_number": int, "fee": int, "tick_spacing": int]
         """
         ...
         
