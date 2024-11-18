@@ -687,7 +687,6 @@ mod tests {
         let pool_address = Address::from_str(pool_address).unwrap();
 
         let result = get_signals_by_pool_address(provider, pool_address, timestamp, interval).await;
-        dbg!(&result);
         assert!(result.is_ok());
     }
 
