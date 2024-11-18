@@ -7,6 +7,11 @@ class UniswapFetcher:
 
         Args:
             rpc_url (str): The RPC URL of the Ethereum node.
+        Examples:
+        >>> uniswap_fetcher = UniswapFetcher("https://mainnet.infura.io/v3/YOUR_INFURA_PROJECT_ID")
+            initialize the UniswapFetcher with the RPC URL "https://mainnet.infura.io/v3/YOUR_INFURA_PROJECT_ID".
+        Recommended:
+        Use local node for faster response time.
         """
         ...
 
@@ -26,6 +31,23 @@ class UniswapFetcher:
 
         Returns:
             Dict: JSON object containing the pool events.
+            {
+                data: [
+                    {
+                        "pool_address": str,
+                        "token0": {"address": str, "name": str, "symbol": str, "decimals": int},
+                        "token1": {"address": str, "name": str, "symbol": str, "decimals": int},
+                        "fee": int,
+                        "tick_spacing": int,
+                        "block_number": int
+                    },
+                    ...
+                ]
+                overall_hash: str
+            }
+        Examples:
+        >>> uniswap_fetcher.get_pool_events_by_token_pairs([("0x6b175474e89094c44da98b954eedeac495", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", 3000)], 10000000, 10000001)
+            fetch pool events for the token pair ("0x6b175474e89094c44da98b954eedeac495", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2") with fee 3000 between the block numbers 10000000 and 10000001.
         """
         ...
 
@@ -43,6 +65,9 @@ class UniswapFetcher:
 
         Returns:
             Tuple[int, int]: Starting and ending block numbers.
+        Examples:
+        >>> uniswap_fetcher.get_block_number_range(1620000000, 1620000001)
+            fetch block number range between the timestamps 1620000000 and 1620000001.
         """
         ...
 
@@ -62,6 +87,23 @@ class UniswapFetcher:
 
         Returns:
             Dict: JSON object containing the pool data.
+            {
+                data: [
+                    {
+                        "pool_address": str,
+                        "token0": {"address": str, "name": str, "symbol": str, "decimals": int},
+                        "token1": {"address": str, "name": str, "symbol": str, "decimals": int},
+                        "fee": int,
+                        "tick_spacing": int,
+                        "block_number": int
+                    },
+                    ...
+                ]
+                overall_hash: str
+            }
+        Examples:
+        >>> uniswap_fetcher.fetch_pool_data([("0x6b175474e89094c44da98b954eedeac495271d0f", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", 3000)], 1620000000, 1620000001)
+            fetch pool data for the token pair ("0x6b175474e89094c44da98b954eedeac495271d0f", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2") with fee 3000 between the timestamps 1620000000 and 1620000001.
         """
         ...
 
@@ -79,7 +121,20 @@ class UniswapFetcher:
         
         Returns:
             Dict: JSON object containing the pool created events.
-            ["token0": {"address": str, "name": str, "symbol": str, "decimals": int}, "token1": {"address": str, "name": str, "symbol": str, "decimals": int}, "pool_address": str, "block_number": int, "fee": int, "tick_spacing": int]
+            [
+                {
+                    "token0": {"address": str, "name": str, "symbol": str, "decimals": int},
+                    "token1": {"address": str, "name": str, "symbol": str, "decimals": int},
+                    "pool_address": str, 
+                    "block_number": int,
+                    "fee": int,
+                    "tick_spacing": int
+                },
+                ...
+            ]
+        Examples:
+        >>> uniswap_fetcher.get_pool_created_events_between_two_timestamps(1620000000, 1620000001)
+            fetch pool created events between the timestamps 1620000000 and 1620000001.
         """
         ...
         
@@ -95,11 +150,15 @@ class UniswapFetcher:
         Args:
             pool_address (str): Pool address.
             timestamp (int): Timestamp.
-            interval (int): Interval.
+            interval (int): signal interval in seconds.
 
         Returns:
             Dict: JSON object containing the signals.
-            ["price": str, "volume": str, "liquidity": str]
+            [{"price": str, "volume": str, "liquidity": str}, ...]
+        Examples:
+        >>> uniswap_fetcher.
+            get_signals_by_pool_address("0x1f98407aaB862CdDeF78Ed252D6f557aA5b0f00d", 1620000000, 3600)
+            fetch signals for the pool address "0x1f98407aaB862CdDeF78Ed252D6f557aA5b0f00d" at timestamp 1620000000 with 1 hour interval.
         """
         ...
     
@@ -120,5 +179,19 @@ class UniswapFetcher:
 
         Returns:
             Dict: JSON object containing the pool events.
+            {
+                data: [
+                    {
+                        "pool_address": str,
+                        "token0": {"address": str, "name": str, "symbol": str, "decimals": int},
+                        "token1": {"address": str, "name": str, "symbol": str, "decimals": int},
+                        "fee": int,
+                        "tick_spacing": int,
+                        "block_number": int
+                    },
+                    ...
+                ]
+                overall_hash: str
+            }
         """
         ...
