@@ -1,6 +1,6 @@
 [package]
 name = "uniswap_fetcher_rs"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 authors = ["venus1004@proton.me"]
 description = "A Rust-based library to fetch and decode Uniswap V3 pool events, designed to be used as a Python module."
