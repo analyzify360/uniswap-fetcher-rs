@@ -558,6 +558,7 @@ async fn get_signals_by_pool_address(
     let mut volume: I256 = I256::from(0);
     let mut liquidity: BigInt = BigInt::from(0);
     let mut swap_event_count: i32 = 0;
+    
     for event in data {
         let event_type = event["event"]["type"].as_str().unwrap();
         let event_data = event["event"]["data"].clone();
@@ -580,7 +581,9 @@ async fn get_signals_by_pool_address(
             _ => (),
         }
     }
-    price = price / swap_event_count as f64;
+    if swap_event_count > 0 {
+        price = price / swap_event_count as f64;
+    }
     let signals = serde_json::json!({
         "price": price.to_string(),
         "volume": volume.to_string(),
@@ -676,14 +679,15 @@ mod tests {
     #[tokio::test]
     async fn test_get_signals_by_pool_address() {
         let pool_address = "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8";
-        let timestamp = 1633046400; // 2021-10-01 00:00:00 UTC
-        let interval = 300; // 1 day in seconds
+        let timestamp = 1613015400; // 2021-10-01 00:00:00 UTC
+        let interval = 300; // 5-min in seconds
         let rpc_url = "http://localhost:8545";
 
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
         let pool_address = Address::from_str(pool_address).unwrap();
 
         let result = get_signals_by_pool_address(provider, pool_address, timestamp, interval).await;
+        dbg!(&result);
         assert!(result.is_ok());
     }
 
