@@ -378,8 +378,18 @@ async fn get_block_number_range(provider:Arc::<Provider<Http>>, start_timestamp:
     // let block_number = provider.get_block_number().await?;
     let average_block_time = get_average_block_time(provider.clone()).await?;
 
-    let start_block_number = get_block_number_from_timestamp(provider.clone(), start_timestamp, average_block_time).await?;
-    let end_block_number = start_block_number + (end_timestamp - start_timestamp) / average_block_time;
+    let mut start_block_number = get_block_number_from_timestamp(provider.clone(), start_timestamp, average_block_time).await?;
+    let mut start_block_timestamp = provider.get_block(start_block_number).await?.ok_or("Block not found")?.timestamp.as_u64();
+    while start_block_timestamp < start_timestamp {
+        start_block_number = start_block_number + 1;
+        start_block_timestamp = provider.get_block(start_block_number).await?.ok_or("Block not found")?.timestamp.as_u64();
+    }
+    let mut end_block_number = get_block_number_from_timestamp(provider.clone(), end_timestamp, average_block_time).await?;
+    let mut end_block_timestamp = provider.get_block(end_block_number).await?.ok_or("Block not found")?.timestamp.as_u64();
+    while end_block_timestamp > end_timestamp {
+        end_block_number = end_block_number - 1;
+        end_block_timestamp = provider.get_block(end_block_number).await?.ok_or("Block not found")?.timestamp.as_u64();
+    }
 
     Ok((start_block_number, end_block_number))
 }
@@ -457,7 +467,6 @@ async fn get_block_number_from_timestamp(
 async fn fetch_pool_data(provider: Arc::<Provider<Http>>, block_cache: Arc<Mutex<HashMap<u64, u64>>>, token_pairs: Vec<(String, String, u32)>, start_timestamp: u64, end_timestamp: u64) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     // let date_str = "2024-09-27 19:34:56";
     let (from_block, to_block) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
-
     let pool_events = get_pool_events_by_token_pairs(provider.clone(), block_cache.clone(), token_pairs, from_block, to_block,).await?;
     Ok(pool_events)
 }
@@ -621,8 +630,8 @@ mod tests {
     async fn test_fetch_pool_data() {
         let token0 = "0xaea46a60368a7bd060eec7df8cba43b7ef41ad85";
         let token1 = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-        let start_datetime = "2024-10-11 10:34:56";
-        let end_datetime = "2024-10-11 12:35:56";
+        let start_datetime = "2021-05-06 00:00:00";
+        let end_datetime = "2021-05-07 00:00:00";
         let rpc_url = "http://localhost:8545";
         let fee = 3000;
 
@@ -635,7 +644,6 @@ mod tests {
             .expect("Failed to parse date");
         let second_datetime_utc = Utc.from_utc_datetime(&second_naive_datetime);
         let second_timestamp = second_datetime_utc.timestamp() as u64;
-
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
         let block_cache = Arc::new(Mutex::new(HashMap::new()));
         let token_pairs = vec![(token0.to_string(), token1.to_string(), fee)];
