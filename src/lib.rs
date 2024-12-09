@@ -625,7 +625,6 @@ async fn get_all_tokens(
     let mut logs = Vec::new();
     let mut current_block_number = start_block_number;
     while current_block_number <= end_block_number {
-        dbg!(current_block_number);
         let next_block_number = current_block_number + BATCH_SIZE;
         let filter = Filter::new()
             .address(factory_address)
@@ -651,6 +650,30 @@ async fn get_all_tokens(
     }
 
     Ok(token_addresses)
+}
+
+async fn get_recent_pool_events(
+    provider: Arc<Provider<Http>>,
+    pool_address: Address,
+    start_timestamp: u64,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let average_block_time = get_average_block_time(provider.clone()).await?;
+    let start_block_number = get_block_number_from_timestamp(provider.clone(), start_timestamp, average_block_time).await?;
+    let end_block_number = provider.get_block_number().await?;
+    let filter = Filter::new()
+        .address(pool_address)
+        .from_block(start_block_number)
+        .to_block(end_block_number)
+        .topic0(vec![
+            H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
+            H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
+            H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
+            H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
+        ]);
+
+    let logs = provider.get_logs(&filter).await?;
+    let events = serialize_logs(logs, provider.clone(), Arc::new(Mutex::new(HashMap::new()))).await?;
+    Ok(events)
 }
 
 #[pymodule]
@@ -776,7 +799,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_all_tokens() {
         let start_timestamp = 1633046400; // 2021-10-01 00:00:00 UTC
-        let end_timestamp = 1649030400; // 2021-10-02 00:00:00 UTC
+        let end_timestamp = 1635030400; // 2021-10-02 00:00:00 UTC
         let rpc_url = "http://localhost:8545";
 
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
@@ -785,5 +808,19 @@ mod tests {
         assert!(result.is_ok());
         let token_addresses = result.unwrap();
         dbg!(token_addresses.len());
+    }
+
+    #[tokio::test]
+    async fn test_get_recent_pool_events() {
+        let pool_address = "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8";
+        let timestamp = 1733702400; // 2024-12-08 00:00:00 UTC
+        let rpc_url = "http://localhost:8545";
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+        let pool_address = Address::from_str(pool_address).unwrap();
+
+        let result = get_recent_pool_events(provider, pool_address, timestamp).await;
+        assert!(result.is_ok());
+        dbg!(result.unwrap());
     }
 }
