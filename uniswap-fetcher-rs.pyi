@@ -1,4 +1,4 @@
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Union
 
 class UniswapFetcher:
     def __init__(self, rpc_url: str) -> None:
@@ -20,7 +20,7 @@ class UniswapFetcher:
         token_pairs: List[Tuple[str, str, int]],
         from_block: int,
         to_block: int
-    ) -> Dict:
+    ) -> Dict[str, Dict[str, Union[str, int, Dict]]]:
         """
         Get pool events by token pairs.
 
@@ -34,12 +34,17 @@ class UniswapFetcher:
             {
                 data: [
                     {
+                        "event": {
+                            "type": str,
+                            "data": {
+                                SwapEvent, MintEvent, BurnEvent
+                            }
+                        },
+                        "block_number": int,
+                        "transaction_hash": str,
                         "pool_address": str,
-                        "token0": {"address": str, "name": str, "symbol": str, "decimals": int},
-                        "token1": {"address": str, "name": str, "symbol": str, "decimals": int},
-                        "fee": int,
-                        "tick_spacing": int,
-                        "block_number": int
+                        "timestamp": int
+                        
                     },
                     ...
                 ]
@@ -47,7 +52,8 @@ class UniswapFetcher:
             }
         Examples:
         >>> uniswap_fetcher.get_pool_events_by_token_pairs([("0x6b175474e89094c44da98b954eedeac495", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", 3000)], 10000000, 10000001)
-            fetch pool events for the token pair ("0x6b175474e89094c44da98b954eedeac495", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2") with fee 3000 between the block numbers 10000000 and 10000001.
+            fetch pool events for the token pair ("0x6b175474e89094c44da98b954", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2") with fee 3000 between the block numbers 10000000 and 10000001.
+            
         """
         ...
 
@@ -86,16 +92,21 @@ class UniswapFetcher:
             end_timestamp (int): Ending timstamp.
 
         Returns:
-            Dict: JSON object containing the pool data.
+            Dict: JSON object containing the pool events.
             {
                 data: [
                     {
+                        "event": {
+                            "type": str,
+                            "data": {
+                                SwapEvent, MintEvent, BurnEvent
+                            }
+                        },
+                        "block_number": int,
+                        "transaction_hash": str,
                         "pool_address": str,
-                        "token0": {"address": str, "name": str, "symbol": str, "decimals": int},
-                        "token1": {"address": str, "name": str, "symbol": str, "decimals": int},
-                        "fee": int,
-                        "tick_spacing": int,
-                        "block_number": int
+                        "timestamp": int
+                        
                     },
                     ...
                 ]
@@ -182,12 +193,17 @@ class UniswapFetcher:
             {
                 data: [
                     {
+                        "event": {
+                            "type": str,
+                            "data": {
+                                SwapEvent, MintEvent, BurnEvent
+                            }
+                        },
+                        "block_number": int,
+                        "transaction_hash": str,
                         "pool_address": str,
-                        "token0": {"address": str, "name": str, "symbol": str, "decimals": int},
-                        "token1": {"address": str, "name": str, "symbol": str, "decimals": int},
-                        "fee": int,
-                        "tick_spacing": int,
-                        "block_number": int
+                        "timestamp": int
+                        
                     },
                     ...
                 ]
@@ -195,3 +211,79 @@ class UniswapFetcher:
             }
         """
         ...
+    
+    def get_all_tokens(
+        self,
+        start_timestamp: int,
+        end_timestamp: int
+    ) -> List[str]:
+        """
+        Get all tokens within the specified time range.
+        
+        Args:
+            start_timestamp (int): Starting timestamp.
+            end_timestamp (int): Ending timestamp.
+        
+        Returns:
+            List[str]: List of token addresses.
+        
+        Examples:
+        >>> uniswap_fetcher.get_all_tokens(1620000000, 1620000001)
+            fetch all tokens between the timestamps 1620000000 and 1620000001.
+            ["0x6b175474e89094c44da98b954eedeac495271d0f", ...]
+        """
+    def get_all_token_pairs(
+        self,
+        start_timestamp: int,
+        end_timestamp: int
+    ) -> List[Tuple[str, str, int, str]]:
+        """
+        Get all token pairs within the specified time range.
+        
+        Args:
+            start_timestamp (int): Starting timestamp.
+            end_timestamp (int): Ending timestamp.
+        
+        Returns:
+            List[Tuple[str, str]]: List of token pairs.
+        
+        Examples:
+        >>> uniswap_fetcher.get_all_token_pairs(1620000000, 1620000001)
+            fetch all token pairs between the timestamps 1620000000 and 1620000001.
+            [("0x6b175474e89094c44da98b954eedeac495271d0f", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", 3000, "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8"), ...]
+        """
+        ...
+    
+    def get_recent_pool_events(
+        self,
+        pool_address: str,
+        start_timestamp: int,
+        end_timestamp: int
+    ) -> Dict:
+        """
+        Get recent pool events by pool address.
+        
+        Returns:
+            Dict: JSON object containing the pool events.
+            {
+                data: [
+                    {
+                        "event": {
+                            "type": str,
+                            "data": {
+                                SwapEvent, MintEvent, BurnEvent
+                            }
+                        },
+                        "block_number": int,
+                        "transaction_hash": str,
+                        "pool_address": str,
+                        "timestamp": int
+                        
+                    },
+                    ...
+                ]
+                overall_hash: str
+            }
+        """
+        ...
+    
