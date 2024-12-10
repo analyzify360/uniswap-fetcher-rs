@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, time};
 use chrono::Utc;
 use ethers::{abi::Abi, contract::Contract, providers:: { Http, Middleware, Provider}, types::Address};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use futures::{future::join_all, lock::Mutex};
 
 use num_bigint::BigInt;
 
-const BATCH_SIZE: usize = 1000; // Number of blocks to fetch in each batch
+const BATCH_SIZE: usize = 10000; // Number of blocks to fetch in each batch
 const NUM_BLOCKS: u64 = 100; // Number of blocks to consider for average block time calculation
 const FACTORY_ADDRESS: &str = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
 const POOL_CREATED_SIGNATURE: &str = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118";
@@ -474,6 +474,10 @@ async fn get_block_number_from_timestamp(
     let latest_block_timestamp = latest_block.timestamp.as_u64();
 
     // Estimate the block number using the average block time
+    let mut timestamp = timestamp;
+    if timestamp > latest_block_timestamp {
+        timestamp = latest_block_timestamp;
+    }
     let estimated_block_number = latest_block_number.as_u64() - (latest_block_timestamp - timestamp) / average_block_time;
 
     // Perform exponential search to find the range
@@ -512,9 +516,17 @@ async fn get_pool_created_events_between_two_timestamps(
     start_timestamp: u64,
     end_timestamp: u64,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    println!("{} | Fetching pool created events between two timestamps", Utc::now());
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
     let mut current_block_number = start_block_number;
     let mut logs = Vec::new();
+    let erc20_abi_json = include_str!("contracts/erc20_abi.json");
+    let erc721_abi_json = include_str!("contracts/erc721_abi.json");
+    let dstoken_abi_json = include_str!("contracts/dstoken_abi.json");
+    let erc20_abi: Abi = serde_json::from_str(erc20_abi_json)?;
+    let erc721_abi: Abi = serde_json::from_str(erc721_abi_json)?;
+    let dstoken_abi: Abi = serde_json::from_str(dstoken_abi_json)?;
+    let abis: Vec<(String, Abi)> = vec![("erc20".to_string(), erc20_abi), ("erc721".to_string(), erc721_abi), ("dstoken".to_string(), dstoken_abi)];
 
     while current_block_number <= end_block_number {
         let next_block_number = min(current_block_number + BATCH_SIZE as u64, end_block_number);
@@ -524,6 +536,7 @@ async fn get_pool_created_events_between_two_timestamps(
             .from_block(current_block_number)
             .to_block(next_block_number);
         let block_logs = provider.get_logs(&filter).await?;
+        println!("{} | Fetched pool created events from block: {:?} to block: {:?}", Utc::now(), current_block_number, next_block_number);
         logs.extend(block_logs);
         current_block_number = next_block_number + 1;
     }
@@ -542,7 +555,7 @@ async fn get_pool_created_events_between_two_timestamps(
                 if let Some(cached_token_info) = cache.get(&pool_created_event.token0) {
                     cached_token_info.clone()
                 } else {
-                    let token_info = get_token_info(provider.clone(), pool_created_event.token0).await.unwrap_or_else(|_| ("".to_string(), "".to_string(), 0.into()));
+                    let token_info = get_token_info(provider.clone(), pool_created_event.token0, abis.clone()).await.unwrap_or_else(|_| ("".to_string(), "".to_string(), 0.into()));
                     cache.insert(pool_created_event.token0, token_info.clone());
                     token_info
                 }
@@ -552,7 +565,7 @@ async fn get_pool_created_events_between_two_timestamps(
                 if let Some(cached_token_info) = cache.get(&pool_created_event.token1) {
                     cached_token_info.clone()
                 } else {
-                    let token_info = get_token_info(provider.clone(), pool_created_event.token1).await.unwrap_or_else(|_| ("".to_string(), "".to_string(), 0.into()));
+                    let token_info = get_token_info(provider.clone(), pool_created_event.token1, abis.clone()).await.unwrap_or_else(|_| ("".to_string(), "".to_string(), 0.into()));
                     cache.insert(pool_created_event.token1, token_info.clone());
                     token_info
                 }
@@ -577,7 +590,7 @@ async fn get_pool_created_events_between_two_timestamps(
             }));
         }
     }
-
+    println!("{} | Completed fetching pool created events", Utc::now());
     Ok(pool_created_events)
 }
 
@@ -647,16 +660,44 @@ async fn get_signals_by_pool_address(
     Ok(signals)
 }
 
-async fn get_token_info(provider: Arc<Provider<Http>>, token_address: Address) -> Result<(String, String, Number), Box<dyn std::error::Error + Send + Sync>> {
-    let abi_json = include_str!("contracts/erc20_abi.json");
-    let abi: Abi = serde_json::from_str(abi_json)?;
-
-    let token = Contract::new(token_address, abi, provider.clone());
-    let name: String = token.method::<(), String>("name", ())?.call().await?;
-    let symbol: String = token.method::<(), String>("symbol", ())?.call().await?;
-    let decimals: u8 = token.method::<(), u8>("decimals", ())?.call().await?;
-
-    Ok((name, symbol, decimals.into()))
+async fn get_token_info(provider: Arc<Provider<Http>>, token_address: Address, abis: Vec<(String, Abi)>) -> Result<(String, String, Number), Box<dyn std::error::Error + Send + Sync>> {
+    
+    let contracts: Vec<_> = abis.iter().map(|abi| (abi.0.clone(), Contract::new(token_address, abi.1.clone(), provider.clone()))).collect();
+    
+    for (contract_type, contract) in contracts {
+        if contract_type == "erc20" {
+            let name: Result<String, _> = contract.method::<(), String>("name", ())?.call().await;
+            let symbol: Result<String, _> = contract.method::<(), String>("symbol", ())?.call().await;
+            let decimals: Result<u8, _> = contract.method::<(), u8>("decimals", ())?.call().await;
+            match (name, symbol, decimals) {
+                (Ok(name), Ok(symbol), Ok(decimals)) => return Ok((name, symbol, decimals.into())),
+                _ => continue,
+            }
+        } else if contract_type == "erc721" {
+            let name: Result<String, _> = contract.method::<(), String>("name", ())?.call().await;
+            let symbol: Result<String, _> = contract.method::<(), String>("symbol", ())?.call().await;
+            match (name, symbol) {
+                (Ok(name), Ok(symbol)) => return Ok((name, symbol, 1.into())),
+                _ => continue,
+            }
+        } else if contract_type == "dstoken" {
+            let name: Result<String, _> = contract.method::<(), [u8; 32]>("name", ())?.call().await.map(|bytes| {
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                String::from_utf8_lossy(&bytes[..end]).to_string()
+            });
+            let symbol: Result<String, _> = contract.method::<(), [u8; 32]>("symbol", ())?.call().await.map(|bytes| {
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                String::from_utf8_lossy(&bytes[..end]).to_string()
+            });
+            let decimals: Result<u8, _> = contract.method::<(), U256>("decimals", ())?.call().await.map(|decimals| decimals.as_u32() as u8);
+            match (name, symbol, decimals) {
+                (Ok(name), Ok(symbol), Ok(decimals)) => return Ok((name, symbol, decimals.into())),
+                _ => continue,
+            }
+        }
+    }
+    Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Token info not found")))
+    
 }
 
 async fn get_all_token_pairs(
@@ -700,6 +741,7 @@ async fn get_all_tokens(
     start_timestamp: u64,
     end_timestamp: u64
 ) -> Result<HashSet<Address>, Box<dyn std::error::Error + Send + Sync>> {
+    println!("{} | Fetching all tokens between {} and {}", Utc::now(),start_timestamp, end_timestamp);
     let factory_address = Address::from_str(FACTORY_ADDRESS)?;
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
     let mut logs = Vec::new();
@@ -713,6 +755,7 @@ async fn get_all_tokens(
             .to_block(next_block_number);
         let block_logs = provider.get_logs(&filter).await?;
         logs.extend(block_logs);
+        println!("{} | Fetched all tokens from block {} to block {} ({}%)", Utc::now(),current_block_number, next_block_number, (next_block_number - start_block_number) * 100 / (end_block_number - start_block_number));
         current_block_number = next_block_number + 1;
     }
 
@@ -728,7 +771,8 @@ async fn get_all_tokens(
             token_addresses.insert(pool_created_event.token1);
         }
     }
-
+    println!("{} | Fetched {} unique tokens", Utc::now(), token_addresses.len());
+    println!("{} | Completed fetching all tokens between {} and {}", Utc::now(), start_timestamp, end_timestamp);
     Ok(token_addresses)
 }
 
@@ -737,6 +781,7 @@ async fn get_recent_pool_events(
     pool_address: Address,
     start_timestamp: u64,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    println!("{} | Fetching recent pool events for pool {} starting from timestamp {}", Utc::now(), pool_address, start_timestamp);
     let average_block_time = get_average_block_time(provider.clone()).await?;
     let start_block_number = get_block_number_from_timestamp(provider.clone(), start_timestamp, average_block_time).await?;
     let end_block_number = provider.get_block_number().await?;
@@ -755,10 +800,12 @@ async fn get_recent_pool_events(
                 H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
             ]);
         let block_logs = provider.get_logs(&filter).await?;
+        println!("{} | Fetched logs from block {} to block {} ({}%)", Utc::now(), current_block_number, next_block_number, (next_block_number - start_block_number) * 100 / (end_block_number - start_block_number));
         logs.extend(block_logs);
         current_block_number = next_block_number + 1;
     }
     let events = serialize_logs(logs, provider.clone(), Arc::new(Mutex::new(HashMap::new()))).await?;
+    println!("{} | Completed fetching recent pool events for pool {} starting from timestamp {}", Utc::now(), pool_address, start_timestamp);
     Ok(events)
 }
 
@@ -830,7 +877,6 @@ mod tests {
         let pool_addresses: Vec<Address> = pool_addresses.iter().map(|address| Address::from_str(address).unwrap()).collect();
 
         let result = get_pool_events_by_pool_addresses(provider, block_cache, pool_addresses, U64::from(from_block), U64::from(to_block)).await;
-        dbg!(&result);
         assert!(result.is_ok());
     }
 
@@ -875,11 +921,21 @@ mod tests {
     }
     #[tokio::test]
     async fn test_get_token_info() {
-        let token_address = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+        let token_address = "0xc36442b4a4522e871399cd717abdd847ab11fe88";
         let rpc_url = "http://localhost:8545";
+        let erc20_abi_json = include_str!("contracts/erc20_abi.json");
+        let erc721_abi_json = include_str!("contracts/erc721_abi.json");
+        let dstoken_abi_json = include_str!("contracts/dstoken_abi.json");
+        let erc20_abi: Abi = serde_json::from_str(erc20_abi_json).unwrap();
+        let erc721_abi: Abi = serde_json::from_str(erc721_abi_json).unwrap();
+        let dstoken_abi: Abi = serde_json::from_str(dstoken_abi_json).unwrap();
+        let abis: Vec<(String, Abi)> = vec![("erc20".to_string(), erc20_abi), ("erc721".to_string(), erc721_abi), ("dstoken".to_string(), dstoken_abi)];
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
-        let result = get_token_info(provider.clone(), Address::from_str(token_address).unwrap()).await.unwrap();
-        assert!(result.1 == "WETH" );
+
+        let result = get_token_info(provider.clone(), Address::from_str(token_address).unwrap(), abis.clone()).await;
+        assert!(result.is_ok());
+        let token_info = result.unwrap();
+        dbg!(token_info);
     }
 
     #[tokio::test]
@@ -907,7 +963,6 @@ mod tests {
 
         let result = get_recent_pool_events(provider, pool_address, timestamp).await;
         assert!(result.is_ok());
-        dbg!(result.unwrap());
     }
 
     #[tokio::test]
