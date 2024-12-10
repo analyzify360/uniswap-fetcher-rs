@@ -13,16 +13,17 @@ use ethers::contract::EthLogDecode;
 use ethers::contract::EthEvent;
 use ethers::utils::hex;
 
+use std::cmp::min;
 use std::collections::HashMap;
 use std::str::FromStr;
 use pyo3::{IntoPy, PyObject};
 use pyo3::types::{PyList, PyDict};
 use futures::{future::join_all, lock::Mutex};
 
+
 use num_bigint::BigInt;
 
-const BATCH_SIZE: usize = 1000;
-const UNISWAP_V3_CREATED_TIMESTAMP: u64 = 1620086400; // 2021-04-24 00:00:00
+const BATCH_SIZE: usize = 1000; // Number of blocks to fetch in each batch
 const NUM_BLOCKS: u64 = 100; // Number of blocks to consider for average block time calculation
 const FACTORY_ADDRESS: &str = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
 const POOL_CREATED_SIGNATURE: &str = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118";
@@ -251,6 +252,30 @@ impl UniswapFetcher {
             Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
         }
     }
+
+    fn get_all_tokens(&self, py: Python, start_timestamp: u64, end_timestamp: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_all_tokens(self.provider.clone(), start_timestamp, end_timestamp)) {
+            Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    fn get_all_token_pairs(&self, py: Python, start_timestamp: u64, end_timestamp: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_all_token_pairs(self.provider.clone(), start_timestamp, end_timestamp)) {
+            Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    fn get_recent_pool_events(&self, py: Python, pool_address: String, start_timestamp: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_recent_pool_events(self.provider.clone(), Address::from_str(&pool_address).unwrap(), start_timestamp)) {
+            Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
     
 }
 
@@ -276,18 +301,25 @@ async fn get_pool_events_by_pool_addresses(
     from_block: U64,
     to_block: U64
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let filter = Filter::new()
-        .address(pool_addresses)
-        .from_block(from_block)
-        .to_block(to_block)
-        .topic0(vec![
-            H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
-        ]);
-    println!("from_block: {:?}, to_block: {:?}", from_block, to_block);
-    let logs = provider.get_logs(&filter).await?;
+    let mut current_block_number = from_block;
+    let mut logs = Vec::new();
+    while current_block_number <= to_block {
+        let next_block_number = min(current_block_number + BATCH_SIZE, to_block);
+        let filter = Filter::new()
+            .address(pool_addresses.clone())
+            .from_block(current_block_number)
+            .to_block(next_block_number)
+            .topic0(vec![
+                H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
+            ]);
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
+    println!("fetched pool events from_block: {:?}, to_block: {:?}", from_block, to_block);
     let events = serialize_logs(logs, provider.clone(), block_cache.clone()).await?;
     Ok(events)
 }
@@ -481,14 +513,20 @@ async fn get_pool_created_events_between_two_timestamps(
     end_timestamp: u64,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
+    let mut current_block_number = start_block_number;
+    let mut logs = Vec::new();
 
-    let filter = Filter::new()
-        .address(factory_address)
-        .topic0(H256::from_str(POOL_CREATED_SIGNATURE).unwrap())
-        .from_block(start_block_number)
-        .to_block(end_block_number);
-
-    let logs = provider.get_logs(&filter).await?;
+    while current_block_number <= end_block_number {
+        let next_block_number = min(current_block_number + BATCH_SIZE as u64, end_block_number);
+        let filter = Filter::new()
+            .address(factory_address)
+            .topic0(H256::from_str(POOL_CREATED_SIGNATURE).unwrap())
+            .from_block(current_block_number)
+            .to_block(next_block_number);
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
 
     let mut pool_created_events = Vec::new();
     for log in logs {
@@ -552,17 +590,23 @@ async fn get_signals_by_pool_address(
     let average_block_time = get_average_block_time(provider.clone()).await?;
     let start_block_number = get_block_number_from_timestamp(provider.clone(), timestamp, average_block_time).await?;
     let end_block_number = start_block_number + interval as u64;
-    let filter = Filter::new()
-        .address(pool_address)
-        .from_block(start_block_number)
-        .to_block(end_block_number)
-        .topic0(vec![
-            H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
-        ]);
-
-    let logs = provider.get_logs(&filter).await?;
+    let mut current_block_number = start_block_number;
+    let mut logs = Vec::new();
+    while current_block_number <= end_block_number {
+        let next_block_number = min(current_block_number + BATCH_SIZE as u64, end_block_number);
+        let filter = Filter::new()
+            .address(pool_address)
+            .from_block(current_block_number)
+            .to_block(next_block_number)
+            .topic0(vec![
+                H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
+            ]);
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
     let events = serialize_logs(logs, provider.clone(), Arc::new(Mutex::new(HashMap::new()))).await?;
     let data = events["data"].as_array().unwrap();
     let mut price: f64 = 0.0;
@@ -619,13 +663,13 @@ async fn get_all_token_pairs(
     provider: Arc<Provider<Http>>,
     start_timestamp: u64,
     end_timestamp: u64
-) -> Result<Vec<(Address, Address, u32)>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<(Address, Address, u32, Address)>, Box<dyn std::error::Error + Send + Sync>> {
     let factory_address = Address::from_str(FACTORY_ADDRESS)?;
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
     let mut logs = Vec::new();
     let mut current_block_number = start_block_number;
     while current_block_number <= end_block_number {
-        let next_block_number = current_block_number + BATCH_SIZE;
+        let next_block_number = min(current_block_number + BATCH_SIZE, end_block_number);
         let filter = Filter::new()
             .address(factory_address)
             .topic0(H256::from_str(POOL_CREATED_SIGNATURE).unwrap())
@@ -644,7 +688,7 @@ async fn get_all_token_pairs(
         };
         if log.topics[0] == H256::from_str(POOL_CREATED_SIGNATURE).unwrap() {
             let pool_created_event = <PoolCreatedEvent as EthLogDecode>::decode_log(&raw_log)?;
-            token_pairs.push((pool_created_event.token0, pool_created_event.token1, pool_created_event.fee));
+            token_pairs.push((pool_created_event.token0, pool_created_event.token1, pool_created_event.fee, pool_created_event.pool));
         }
     }
 
@@ -661,7 +705,7 @@ async fn get_all_tokens(
     let mut logs = Vec::new();
     let mut current_block_number = start_block_number;
     while current_block_number <= end_block_number {
-        let next_block_number = current_block_number + BATCH_SIZE;
+        let next_block_number = min(current_block_number + BATCH_SIZE, end_block_number);
         let filter = Filter::new()
             .address(factory_address)
             .topic0(H256::from_str(POOL_CREATED_SIGNATURE).unwrap())
@@ -696,18 +740,24 @@ async fn get_recent_pool_events(
     let average_block_time = get_average_block_time(provider.clone()).await?;
     let start_block_number = get_block_number_from_timestamp(provider.clone(), start_timestamp, average_block_time).await?;
     let end_block_number = provider.get_block_number().await?;
-    let filter = Filter::new()
-        .address(pool_address)
-        .from_block(start_block_number)
-        .to_block(end_block_number)
-        .topic0(vec![
-            H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
-        ]);
-
-    let logs = provider.get_logs(&filter).await?;
+    let mut current_block_number = start_block_number;
+    let mut logs = Vec::new();
+    while current_block_number <= end_block_number {
+        let next_block_number = min(current_block_number + BATCH_SIZE, end_block_number);
+        let filter = Filter::new()
+            .address(pool_address)
+            .from_block(current_block_number)
+            .to_block(next_block_number)
+            .topic0(vec![
+                H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
+            ]);
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
     let events = serialize_logs(logs, provider.clone(), Arc::new(Mutex::new(HashMap::new()))).await?;
     Ok(events)
 }
