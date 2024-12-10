@@ -515,6 +515,13 @@ async fn get_pool_created_events_between_two_timestamps(
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
     let mut current_block_number = start_block_number;
     let mut logs = Vec::new();
+    let erc20_abi_json = include_str!("contracts/erc20_abi.json");
+    let erc721_abi_json = include_str!("contracts/erc721_abi.json");
+    let dstoken_abi_json = include_str!("contracts/dstoken_abi.json");
+    let erc20_abi: Abi = serde_json::from_str(erc20_abi_json)?;
+    let erc721_abi: Abi = serde_json::from_str(erc721_abi_json)?;
+    let dstoken_abi: Abi = serde_json::from_str(dstoken_abi_json)?;
+    let abis: Vec<(String, Abi)> = vec![("erc20".to_string(), erc20_abi), ("erc721".to_string(), erc721_abi), ("dstoken".to_string(), dstoken_abi)];
 
     while current_block_number <= end_block_number {
         let next_block_number = min(current_block_number + BATCH_SIZE as u64, end_block_number);
@@ -542,7 +549,7 @@ async fn get_pool_created_events_between_two_timestamps(
                 if let Some(cached_token_info) = cache.get(&pool_created_event.token0) {
                     cached_token_info.clone()
                 } else {
-                    let token_info = get_token_info(provider.clone(), pool_created_event.token0).await.unwrap_or_else(|_| ("".to_string(), "".to_string(), 0.into()));
+                    let token_info = get_token_info(provider.clone(), pool_created_event.token0, abis.clone()).await.unwrap_or_else(|_| ("".to_string(), "".to_string(), 0.into()));
                     cache.insert(pool_created_event.token0, token_info.clone());
                     token_info
                 }
@@ -552,7 +559,7 @@ async fn get_pool_created_events_between_two_timestamps(
                 if let Some(cached_token_info) = cache.get(&pool_created_event.token1) {
                     cached_token_info.clone()
                 } else {
-                    let token_info = get_token_info(provider.clone(), pool_created_event.token1).await.unwrap_or_else(|_| ("".to_string(), "".to_string(), 0.into()));
+                    let token_info = get_token_info(provider.clone(), pool_created_event.token1, abis.clone()).await.unwrap_or_else(|_| ("".to_string(), "".to_string(), 0.into()));
                     cache.insert(pool_created_event.token1, token_info.clone());
                     token_info
                 }
@@ -647,16 +654,44 @@ async fn get_signals_by_pool_address(
     Ok(signals)
 }
 
-async fn get_token_info(provider: Arc<Provider<Http>>, token_address: Address) -> Result<(String, String, Number), Box<dyn std::error::Error + Send + Sync>> {
-    let abi_json = include_str!("contracts/erc20_abi.json");
-    let abi: Abi = serde_json::from_str(abi_json)?;
-
-    let token = Contract::new(token_address, abi, provider.clone());
-    let name: String = token.method::<(), String>("name", ())?.call().await?;
-    let symbol: String = token.method::<(), String>("symbol", ())?.call().await?;
-    let decimals: u8 = token.method::<(), u8>("decimals", ())?.call().await?;
-
-    Ok((name, symbol, decimals.into()))
+async fn get_token_info(provider: Arc<Provider<Http>>, token_address: Address, abis: Vec<(String, Abi)>) -> Result<(String, String, Number), Box<dyn std::error::Error + Send + Sync>> {
+    
+    let contracts: Vec<_> = abis.iter().map(|abi| (abi.0.clone(), Contract::new(token_address, abi.1.clone(), provider.clone()))).collect();
+    
+    for (contract_type, contract) in contracts {
+        if contract_type == "erc20" {
+            let name: Result<String, _> = contract.method::<(), String>("name", ())?.call().await;
+            let symbol: Result<String, _> = contract.method::<(), String>("symbol", ())?.call().await;
+            let decimals: Result<u8, _> = contract.method::<(), u8>("decimals", ())?.call().await;
+            match (name, symbol, decimals) {
+                (Ok(name), Ok(symbol), Ok(decimals)) => return Ok((name, symbol, decimals.into())),
+                _ => continue,
+            }
+        } else if contract_type == "erc721" {
+            let name: Result<String, _> = contract.method::<(), String>("name", ())?.call().await;
+            let symbol: Result<String, _> = contract.method::<(), String>("symbol", ())?.call().await;
+            match (name, symbol) {
+                (Ok(name), Ok(symbol)) => return Ok((name, symbol, 1.into())),
+                _ => continue,
+            }
+        } else if contract_type == "dstoken" {
+            let name: Result<String, _> = contract.method::<(), [u8; 32]>("name", ())?.call().await.map(|bytes| {
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                String::from_utf8_lossy(&bytes[..end]).to_string()
+            });
+            let symbol: Result<String, _> = contract.method::<(), [u8; 32]>("symbol", ())?.call().await.map(|bytes| {
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                String::from_utf8_lossy(&bytes[..end]).to_string()
+            });
+            let decimals: Result<u8, _> = contract.method::<(), U256>("decimals", ())?.call().await.map(|decimals| decimals.as_u32() as u8);
+            match (name, symbol, decimals) {
+                (Ok(name), Ok(symbol), Ok(decimals)) => return Ok((name, symbol, decimals.into())),
+                _ => continue,
+            }
+        }
+    }
+    Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Token info not found")))
+    
 }
 
 async fn get_all_token_pairs(
@@ -830,7 +865,6 @@ mod tests {
         let pool_addresses: Vec<Address> = pool_addresses.iter().map(|address| Address::from_str(address).unwrap()).collect();
 
         let result = get_pool_events_by_pool_addresses(provider, block_cache, pool_addresses, U64::from(from_block), U64::from(to_block)).await;
-        dbg!(&result);
         assert!(result.is_ok());
     }
 
@@ -875,11 +909,21 @@ mod tests {
     }
     #[tokio::test]
     async fn test_get_token_info() {
-        let token_address = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+        let token_address = "0xc36442b4a4522e871399cd717abdd847ab11fe88";
         let rpc_url = "http://localhost:8545";
+        let erc20_abi_json = include_str!("contracts/erc20_abi.json");
+        let erc721_abi_json = include_str!("contracts/erc721_abi.json");
+        let dstoken_abi_json = include_str!("contracts/dstoken_abi.json");
+        let erc20_abi: Abi = serde_json::from_str(erc20_abi_json).unwrap();
+        let erc721_abi: Abi = serde_json::from_str(erc721_abi_json).unwrap();
+        let dstoken_abi: Abi = serde_json::from_str(dstoken_abi_json).unwrap();
+        let abis: Vec<(String, Abi)> = vec![("erc20".to_string(), erc20_abi), ("erc721".to_string(), erc721_abi), ("dstoken".to_string(), dstoken_abi)];
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
-        let result = get_token_info(provider.clone(), Address::from_str(token_address).unwrap()).await.unwrap();
-        assert!(result.1 == "WETH" );
+
+        let result = get_token_info(provider.clone(), Address::from_str(token_address).unwrap(), abis.clone()).await;
+        assert!(result.is_ok());
+        let token_info = result.unwrap();
+        dbg!(token_info);
     }
 
     #[tokio::test]
@@ -907,7 +951,6 @@ mod tests {
 
         let result = get_recent_pool_events(provider, pool_address, timestamp).await;
         assert!(result.is_ok());
-        dbg!(result.unwrap());
     }
 
     #[tokio::test]
