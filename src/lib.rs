@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, time};
 use chrono::Utc;
 use ethers::{abi::Abi, contract::Contract, providers:: { Http, Middleware, Provider}, types::Address};
 use serde::{Deserialize, Serialize};
@@ -474,6 +474,10 @@ async fn get_block_number_from_timestamp(
     let latest_block_timestamp = latest_block.timestamp.as_u64();
 
     // Estimate the block number using the average block time
+    let mut timestamp = timestamp;
+    if timestamp > latest_block_timestamp {
+        timestamp = latest_block_timestamp;
+    }
     let estimated_block_number = latest_block_number.as_u64() - (latest_block_timestamp - timestamp) / average_block_time;
 
     // Perform exponential search to find the range
