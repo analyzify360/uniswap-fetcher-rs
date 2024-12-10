@@ -4,7 +4,7 @@ use chrono::Utc;
 use ethers::{abi::Abi, contract::Contract, providers:: { Http, Middleware, Provider}, types::Address};
 use serde::{Deserialize, Serialize};
 use sha2::{ Digest, Sha256};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use serde_json::{self, Number, Value};
 use std::marker::Send;
 use ethers::types::{Filter, Log, H160, H256, U64, I256, U256, Block, BlockNumber};
@@ -13,14 +13,17 @@ use ethers::contract::EthLogDecode;
 use ethers::contract::EthEvent;
 use ethers::utils::hex;
 
+use std::cmp::min;
 use std::collections::HashMap;
 use std::str::FromStr;
 use pyo3::{IntoPy, PyObject};
 use pyo3::types::{PyList, PyDict};
 use futures::{future::join_all, lock::Mutex};
 
+
 use num_bigint::BigInt;
 
+const BATCH_SIZE: usize = 1000; // Number of blocks to fetch in each batch
 const NUM_BLOCKS: u64 = 100; // Number of blocks to consider for average block time calculation
 const FACTORY_ADDRESS: &str = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
 const POOL_CREATED_SIGNATURE: &str = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118";
@@ -249,6 +252,30 @@ impl UniswapFetcher {
             Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
         }
     }
+
+    fn get_all_tokens(&self, py: Python, start_timestamp: u64, end_timestamp: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_all_tokens(self.provider.clone(), start_timestamp, end_timestamp)) {
+            Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    fn get_all_token_pairs(&self, py: Python, start_timestamp: u64, end_timestamp: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_all_token_pairs(self.provider.clone(), start_timestamp, end_timestamp)) {
+            Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    fn get_recent_pool_events(&self, py: Python, pool_address: String, start_timestamp: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_recent_pool_events(self.provider.clone(), Address::from_str(&pool_address).unwrap(), start_timestamp)) {
+            Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
     
 }
 
@@ -274,18 +301,25 @@ async fn get_pool_events_by_pool_addresses(
     from_block: U64,
     to_block: U64
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let filter = Filter::new()
-        .address(pool_addresses)
-        .from_block(from_block)
-        .to_block(to_block)
-        .topic0(vec![
-            H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
-        ]);
-    println!("from_block: {:?}, to_block: {:?}", from_block, to_block);
-    let logs = provider.get_logs(&filter).await?;
+    let mut current_block_number = from_block;
+    let mut logs = Vec::new();
+    while current_block_number <= to_block {
+        let next_block_number = min(current_block_number + BATCH_SIZE, to_block);
+        let filter = Filter::new()
+            .address(pool_addresses.clone())
+            .from_block(current_block_number)
+            .to_block(next_block_number)
+            .topic0(vec![
+                H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
+            ]);
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
+    println!("fetched pool events from_block: {:?}, to_block: {:?}", from_block, to_block);
     let events = serialize_logs(logs, provider.clone(), block_cache.clone()).await?;
     Ok(events)
 }
@@ -378,8 +412,18 @@ async fn get_block_number_range(provider:Arc::<Provider<Http>>, start_timestamp:
     // let block_number = provider.get_block_number().await?;
     let average_block_time = get_average_block_time(provider.clone()).await?;
 
-    let start_block_number = get_block_number_from_timestamp(provider.clone(), start_timestamp, average_block_time).await?;
-    let end_block_number = start_block_number + (end_timestamp - start_timestamp) / average_block_time;
+    let mut start_block_number = get_block_number_from_timestamp(provider.clone(), start_timestamp, average_block_time).await?;
+    let mut start_block_timestamp = provider.get_block(start_block_number).await?.ok_or("Block not found")?.timestamp.as_u64();
+    while start_block_timestamp < start_timestamp {
+        start_block_number = start_block_number + 1;
+        start_block_timestamp = provider.get_block(start_block_number).await?.ok_or("Block not found")?.timestamp.as_u64();
+    }
+    let mut end_block_number = get_block_number_from_timestamp(provider.clone(), end_timestamp, average_block_time).await?;
+    let mut end_block_timestamp = provider.get_block(end_block_number).await?.ok_or("Block not found")?.timestamp.as_u64();
+    while end_block_timestamp > end_timestamp {
+        end_block_number = end_block_number - 1;
+        end_block_timestamp = provider.get_block(end_block_number).await?.ok_or("Block not found")?.timestamp.as_u64();
+    }
 
     Ok((start_block_number, end_block_number))
 }
@@ -457,7 +501,6 @@ async fn get_block_number_from_timestamp(
 async fn fetch_pool_data(provider: Arc::<Provider<Http>>, block_cache: Arc<Mutex<HashMap<u64, u64>>>, token_pairs: Vec<(String, String, u32)>, start_timestamp: u64, end_timestamp: u64) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     // let date_str = "2024-09-27 19:34:56";
     let (from_block, to_block) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
-
     let pool_events = get_pool_events_by_token_pairs(provider.clone(), block_cache.clone(), token_pairs, from_block, to_block,).await?;
     Ok(pool_events)
 }
@@ -470,14 +513,20 @@ async fn get_pool_created_events_between_two_timestamps(
     end_timestamp: u64,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
+    let mut current_block_number = start_block_number;
+    let mut logs = Vec::new();
 
-    let filter = Filter::new()
-        .address(factory_address)
-        .topic0(H256::from_str(POOL_CREATED_SIGNATURE).unwrap())
-        .from_block(start_block_number)
-        .to_block(end_block_number);
-
-    let logs = provider.get_logs(&filter).await?;
+    while current_block_number <= end_block_number {
+        let next_block_number = min(current_block_number + BATCH_SIZE as u64, end_block_number);
+        let filter = Filter::new()
+            .address(factory_address)
+            .topic0(H256::from_str(POOL_CREATED_SIGNATURE).unwrap())
+            .from_block(current_block_number)
+            .to_block(next_block_number);
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
 
     let mut pool_created_events = Vec::new();
     for log in logs {
@@ -541,17 +590,23 @@ async fn get_signals_by_pool_address(
     let average_block_time = get_average_block_time(provider.clone()).await?;
     let start_block_number = get_block_number_from_timestamp(provider.clone(), timestamp, average_block_time).await?;
     let end_block_number = start_block_number + interval as u64;
-    let filter = Filter::new()
-        .address(pool_address)
-        .from_block(start_block_number)
-        .to_block(end_block_number)
-        .topic0(vec![
-            H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
-            H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
-        ]);
-
-    let logs = provider.get_logs(&filter).await?;
+    let mut current_block_number = start_block_number;
+    let mut logs = Vec::new();
+    while current_block_number <= end_block_number {
+        let next_block_number = min(current_block_number + BATCH_SIZE as u64, end_block_number);
+        let filter = Filter::new()
+            .address(pool_address)
+            .from_block(current_block_number)
+            .to_block(next_block_number)
+            .topic0(vec![
+                H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
+            ]);
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
     let events = serialize_logs(logs, provider.clone(), Arc::new(Mutex::new(HashMap::new()))).await?;
     let data = events["data"].as_array().unwrap();
     let mut price: f64 = 0.0;
@@ -604,6 +659,109 @@ async fn get_token_info(provider: Arc<Provider<Http>>, token_address: Address) -
     Ok((name, symbol, decimals.into()))
 }
 
+async fn get_all_token_pairs(
+    provider: Arc<Provider<Http>>,
+    start_timestamp: u64,
+    end_timestamp: u64
+) -> Result<Vec<(Address, Address, u32, Address)>, Box<dyn std::error::Error + Send + Sync>> {
+    let factory_address = Address::from_str(FACTORY_ADDRESS)?;
+    let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
+    let mut logs = Vec::new();
+    let mut current_block_number = start_block_number;
+    while current_block_number <= end_block_number {
+        let next_block_number = min(current_block_number + BATCH_SIZE, end_block_number);
+        let filter = Filter::new()
+            .address(factory_address)
+            .topic0(H256::from_str(POOL_CREATED_SIGNATURE).unwrap())
+            .from_block(current_block_number)
+            .to_block(next_block_number);
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
+
+    let mut token_pairs = Vec::new();
+    for log in logs {
+        let raw_log = RawLog {
+            topics: log.topics.clone(),
+            data: log.data.to_vec(),
+        };
+        if log.topics[0] == H256::from_str(POOL_CREATED_SIGNATURE).unwrap() {
+            let pool_created_event = <PoolCreatedEvent as EthLogDecode>::decode_log(&raw_log)?;
+            token_pairs.push((pool_created_event.token0, pool_created_event.token1, pool_created_event.fee, pool_created_event.pool));
+        }
+    }
+
+    Ok(token_pairs)
+}
+
+async fn get_all_tokens(
+    provider: Arc<Provider<Http>>,
+    start_timestamp: u64,
+    end_timestamp: u64
+) -> Result<HashSet<Address>, Box<dyn std::error::Error + Send + Sync>> {
+    let factory_address = Address::from_str(FACTORY_ADDRESS)?;
+    let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
+    let mut logs = Vec::new();
+    let mut current_block_number = start_block_number;
+    while current_block_number <= end_block_number {
+        let next_block_number = min(current_block_number + BATCH_SIZE, end_block_number);
+        let filter = Filter::new()
+            .address(factory_address)
+            .topic0(H256::from_str(POOL_CREATED_SIGNATURE).unwrap())
+            .from_block(current_block_number)
+            .to_block(next_block_number);
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
+
+    let mut token_addresses = HashSet::new();
+    for log in logs {
+        let raw_log = RawLog {
+            topics: log.topics.clone(),
+            data: log.data.to_vec(),
+        };
+        if log.topics[0] == H256::from_str(POOL_CREATED_SIGNATURE).unwrap() {
+            let pool_created_event = <PoolCreatedEvent as EthLogDecode>::decode_log(&raw_log)?;
+            token_addresses.insert(pool_created_event.token0);
+            token_addresses.insert(pool_created_event.token1);
+        }
+    }
+
+    Ok(token_addresses)
+}
+
+async fn get_recent_pool_events(
+    provider: Arc<Provider<Http>>,
+    pool_address: Address,
+    start_timestamp: u64,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let average_block_time = get_average_block_time(provider.clone()).await?;
+    let start_block_number = get_block_number_from_timestamp(provider.clone(), start_timestamp, average_block_time).await?;
+    let end_block_number = provider.get_block_number().await?;
+    let mut current_block_number = start_block_number;
+    let mut logs = Vec::new();
+    while current_block_number <= end_block_number {
+        let next_block_number = min(current_block_number + BATCH_SIZE, end_block_number);
+        let filter = Filter::new()
+            .address(pool_address)
+            .from_block(current_block_number)
+            .to_block(next_block_number)
+            .topic0(vec![
+                H256::from_str(SWAP_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(MINT_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(BURN_EVENT_SIGNATURE).unwrap(),
+                H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
+            ]);
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
+    let events = serialize_logs(logs, provider.clone(), Arc::new(Mutex::new(HashMap::new()))).await?;
+    Ok(events)
+}
+
 #[pymodule]
 fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<UniswapFetcher>()?;
@@ -621,8 +779,8 @@ mod tests {
     async fn test_fetch_pool_data() {
         let token0 = "0xaea46a60368a7bd060eec7df8cba43b7ef41ad85";
         let token1 = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-        let start_datetime = "2024-10-11 10:34:56";
-        let end_datetime = "2024-10-11 12:35:56";
+        let start_datetime = "2021-05-06 00:00:00";
+        let end_datetime = "2021-05-07 00:00:00";
         let rpc_url = "http://localhost:8545";
         let fee = 3000;
 
@@ -635,7 +793,6 @@ mod tests {
             .expect("Failed to parse date");
         let second_datetime_utc = Utc.from_utc_datetime(&second_naive_datetime);
         let second_timestamp = second_datetime_utc.timestamp() as u64;
-
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
         let block_cache = Arc::new(Mutex::new(HashMap::new()));
         let token_pairs = vec![(token0.to_string(), token1.to_string(), fee)];
@@ -663,9 +820,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_pool_events_by_pool_addresses() {
-        let pool_addresses = vec!["0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8"];
-        let from_block = 12345678;
-        let to_block = 12345778;
+        let pool_addresses = vec!["0x11b815efb8f581194ae79006d24e0d814b7697f6"];
+        let from_block = 12376933;
+        let to_block = 12376933;
         let rpc_url = "http://localhost:8545";
 
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
@@ -673,6 +830,7 @@ mod tests {
         let pool_addresses: Vec<Address> = pool_addresses.iter().map(|address| Address::from_str(address).unwrap()).collect();
 
         let result = get_pool_events_by_pool_addresses(provider, block_cache, pool_addresses, U64::from(from_block), U64::from(to_block)).await;
+        dbg!(&result);
         assert!(result.is_ok());
     }
 
@@ -722,5 +880,47 @@ mod tests {
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
         let result = get_token_info(provider.clone(), Address::from_str(token_address).unwrap()).await.unwrap();
         assert!(result.1 == "WETH" );
+    }
+
+    #[tokio::test]
+    async fn test_get_all_tokens() {
+        let start_timestamp = 1633046400; // 2021-10-01 00:00:00 UTC
+        let end_timestamp = 1635030400; // 2021-10-02 00:00:00 UTC
+        let rpc_url = "http://localhost:8545";
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+
+        let result = get_all_tokens(provider, start_timestamp, end_timestamp).await;
+        assert!(result.is_ok());
+        let token_addresses = result.unwrap();
+        dbg!(token_addresses.len());
+    }
+
+    #[tokio::test]
+    async fn test_get_recent_pool_events() {
+        let pool_address = "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8";
+        let timestamp = 1733702400; // 2024-12-08 00:00:00 UTC
+        let rpc_url = "http://localhost:8545";
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+        let pool_address = Address::from_str(pool_address).unwrap();
+
+        let result = get_recent_pool_events(provider, pool_address, timestamp).await;
+        assert!(result.is_ok());
+        dbg!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_get_all_token_pairs() {
+        let start_timestamp = 1633046400; // 2021-10-01 00:00:00 UTC
+        let end_timestamp = 1635030400; // 2021-10-02 00:00:00 UTC
+        let rpc_url = "http://localhost:8545";
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+
+        let result = get_all_token_pairs(provider, start_timestamp, end_timestamp).await;
+        assert!(result.is_ok());
+        let token_pairs = result.unwrap();
+        dbg!(token_pairs.len());
     }
 }

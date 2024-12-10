@@ -20,7 +20,7 @@ Uniswap Fetcher is a Rust-based library that provides functionalities to fetch a
 1. Clone the repository:
 
     ```sh
-    git clone https://github.com/yourusername/uniswap-fetcher-rs.git
+    git clone https://github.com/nestlest/uniswap-fetcher-rs.git
     cd uniswap-fetcher-rs
     ```
 
