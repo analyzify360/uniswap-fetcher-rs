@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use tokio::{runtime::Runtime, time};
+use tokio::runtime::Runtime;
 use chrono::Utc;
 use ethers::{abi::Abi, contract::Contract, providers:: { Http, Middleware, Provider}, types::Address};
 use serde::{Deserialize, Serialize};
@@ -405,7 +405,7 @@ async fn get_block_number_range(provider:Arc::<Provider<Http>>, start_timestamp:
     
     // Check if the given date time is more than the current date time
     let current_timestamp = Utc::now().timestamp() as u64;
-    if start_timestamp > current_timestamp {
+    if start_timestamp > current_timestamp || end_timestamp > current_timestamp {
         return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Given date time is in the future")));
     }
 
