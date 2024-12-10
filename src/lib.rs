@@ -615,6 +615,42 @@ async fn get_token_info(provider: Arc<Provider<Http>>, token_address: Address) -
     Ok((name, symbol, decimals.into()))
 }
 
+async fn get_all_token_pairs(
+    provider: Arc<Provider<Http>>,
+    start_timestamp: u64,
+    end_timestamp: u64
+) -> Result<Vec<(Address, Address, u32)>, Box<dyn std::error::Error + Send + Sync>> {
+    let factory_address = Address::from_str(FACTORY_ADDRESS)?;
+    let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
+    let mut logs = Vec::new();
+    let mut current_block_number = start_block_number;
+    while current_block_number <= end_block_number {
+        let next_block_number = current_block_number + BATCH_SIZE;
+        let filter = Filter::new()
+            .address(factory_address)
+            .topic0(H256::from_str(POOL_CREATED_SIGNATURE).unwrap())
+            .from_block(current_block_number)
+            .to_block(next_block_number);
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
+
+    let mut token_pairs = Vec::new();
+    for log in logs {
+        let raw_log = RawLog {
+            topics: log.topics.clone(),
+            data: log.data.to_vec(),
+        };
+        if log.topics[0] == H256::from_str(POOL_CREATED_SIGNATURE).unwrap() {
+            let pool_created_event = <PoolCreatedEvent as EthLogDecode>::decode_log(&raw_log)?;
+            token_pairs.push((pool_created_event.token0, pool_created_event.token1, pool_created_event.fee));
+        }
+    }
+
+    Ok(token_pairs)
+}
+
 async fn get_all_tokens(
     provider: Arc<Provider<Http>>,
     start_timestamp: u64,
@@ -822,5 +858,19 @@ mod tests {
         let result = get_recent_pool_events(provider, pool_address, timestamp).await;
         assert!(result.is_ok());
         dbg!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_get_all_token_pairs() {
+        let start_timestamp = 1633046400; // 2021-10-01 00:00:00 UTC
+        let end_timestamp = 1635030400; // 2021-10-02 00:00:00 UTC
+        let rpc_url = "http://localhost:8545";
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+
+        let result = get_all_token_pairs(provider, start_timestamp, end_timestamp).await;
+        assert!(result.is_ok());
+        let token_pairs = result.unwrap();
+        dbg!(token_pairs.len());
     }
 }
