@@ -23,7 +23,7 @@ use futures::{future::join_all, lock::Mutex};
 
 use num_bigint::BigInt;
 
-const BATCH_SIZE: usize = 1000; // Number of blocks to fetch in each batch
+const BATCH_SIZE: usize = 10000; // Number of blocks to fetch in each batch
 const NUM_BLOCKS: u64 = 100; // Number of blocks to consider for average block time calculation
 const FACTORY_ADDRESS: &str = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
 const POOL_CREATED_SIGNATURE: &str = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118";
@@ -512,6 +512,7 @@ async fn get_pool_created_events_between_two_timestamps(
     start_timestamp: u64,
     end_timestamp: u64,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    println!("Fetching pool created events between two timestamps");
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
     let mut current_block_number = start_block_number;
     let mut logs = Vec::new();
@@ -531,6 +532,7 @@ async fn get_pool_created_events_between_two_timestamps(
             .from_block(current_block_number)
             .to_block(next_block_number);
         let block_logs = provider.get_logs(&filter).await?;
+        println!("Fetched pool created events from block: {:?} to block: {:?}", current_block_number, next_block_number);
         logs.extend(block_logs);
         current_block_number = next_block_number + 1;
     }
@@ -584,7 +586,7 @@ async fn get_pool_created_events_between_two_timestamps(
             }));
         }
     }
-
+    println!("Completed fetching pool created events");
     Ok(pool_created_events)
 }
 
@@ -735,6 +737,7 @@ async fn get_all_tokens(
     start_timestamp: u64,
     end_timestamp: u64
 ) -> Result<HashSet<Address>, Box<dyn std::error::Error + Send + Sync>> {
+    println!("Fetching all tokens between {} and {}", start_timestamp, end_timestamp);
     let factory_address = Address::from_str(FACTORY_ADDRESS)?;
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
     let mut logs = Vec::new();
@@ -748,6 +751,7 @@ async fn get_all_tokens(
             .to_block(next_block_number);
         let block_logs = provider.get_logs(&filter).await?;
         logs.extend(block_logs);
+        println!("Fetched all tokens from block {} to block {} ({}%)", current_block_number, next_block_number, (next_block_number - start_block_number) * 100 / (end_block_number - start_block_number));
         current_block_number = next_block_number + 1;
     }
 
@@ -763,7 +767,8 @@ async fn get_all_tokens(
             token_addresses.insert(pool_created_event.token1);
         }
     }
-
+    println!("Fetched {} unique tokens", token_addresses.len());
+    println!("Completed fetching all tokens between {} and {}", start_timestamp, end_timestamp);
     Ok(token_addresses)
 }
 
@@ -772,6 +777,7 @@ async fn get_recent_pool_events(
     pool_address: Address,
     start_timestamp: u64,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    println!("Fetching recent pool events for pool {} starting from timestamp {}", pool_address, start_timestamp);
     let average_block_time = get_average_block_time(provider.clone()).await?;
     let start_block_number = get_block_number_from_timestamp(provider.clone(), start_timestamp, average_block_time).await?;
     let end_block_number = provider.get_block_number().await?;
@@ -790,10 +796,12 @@ async fn get_recent_pool_events(
                 H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
             ]);
         let block_logs = provider.get_logs(&filter).await?;
+        println!("Fetched logs from block {} to block {} ({}%)", current_block_number, next_block_number, (next_block_number - start_block_number) * 100 / (end_block_number - start_block_number));
         logs.extend(block_logs);
         current_block_number = next_block_number + 1;
     }
     let events = serialize_logs(logs, provider.clone(), Arc::new(Mutex::new(HashMap::new()))).await?;
+    println!("Completed fetching recent pool events for pool {} starting from timestamp {}", pool_address, start_timestamp);
     Ok(events)
 }
 
