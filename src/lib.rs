@@ -276,6 +276,14 @@ impl UniswapFetcher {
             Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
         }
     }
+
+    fn get_timestamp_by_block_number(&self, py: Python, block_number: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_timestamp_by_block_number(self.provider.clone(), block_number)) {
+            Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
     
 }
 
@@ -536,7 +544,6 @@ async fn get_pool_created_events_between_two_timestamps(
             .from_block(current_block_number)
             .to_block(next_block_number);
         let block_logs = provider.get_logs(&filter).await?;
-        println!("{} | Fetched pool created events from block: {:?} to block: {:?}", Utc::now(), current_block_number, next_block_number);
         logs.extend(block_logs);
         current_block_number = next_block_number + 1;
     }
@@ -670,14 +677,20 @@ async fn get_token_info(provider: Arc<Provider<Http>>, token_address: Address, a
             let symbol: Result<String, _> = contract.method::<(), String>("symbol", ())?.call().await;
             let decimals: Result<u8, _> = contract.method::<(), u8>("decimals", ())?.call().await;
             match (name, symbol, decimals) {
-                (Ok(name), Ok(symbol), Ok(decimals)) => return Ok((name, symbol, decimals.into())),
+                (Ok(name), Ok(symbol), Ok(decimals)) => return Ok((
+                    name.trim_end_matches('\0').to_string(),
+                    symbol.trim_end_matches('\0').to_string(),
+                    decimals.into())),
                 _ => continue,
             }
         } else if contract_type == "erc721" {
             let name: Result<String, _> = contract.method::<(), String>("name", ())?.call().await;
             let symbol: Result<String, _> = contract.method::<(), String>("symbol", ())?.call().await;
             match (name, symbol) {
-                (Ok(name), Ok(symbol)) => return Ok((name, symbol, 1.into())),
+                (Ok(name), Ok(symbol)) => return Ok((
+                    name.trim_end_matches('\0').to_string(),
+                    symbol.trim_end_matches('\0').to_string(),
+                    1.into())),
                 _ => continue,
             }
         } else if contract_type == "dstoken" {
@@ -755,7 +768,6 @@ async fn get_all_tokens(
             .to_block(next_block_number);
         let block_logs = provider.get_logs(&filter).await?;
         logs.extend(block_logs);
-        println!("{} | Fetched all tokens from block {} to block {} ({}%)", Utc::now(),current_block_number, next_block_number, (next_block_number - start_block_number) * 100 / (end_block_number - start_block_number));
         current_block_number = next_block_number + 1;
     }
 
@@ -800,7 +812,6 @@ async fn get_recent_pool_events(
                 H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
             ]);
         let block_logs = provider.get_logs(&filter).await?;
-        println!("{} | Fetched logs from block {} to block {} ({}%)", Utc::now(), current_block_number, next_block_number, (next_block_number - start_block_number) * 100 / (end_block_number - start_block_number));
         logs.extend(block_logs);
         current_block_number = next_block_number + 1;
     }
@@ -809,10 +820,35 @@ async fn get_recent_pool_events(
     Ok(events)
 }
 
-async fn get_timestamp_by_blocknumber(provider: Arc<Provider<Http>>, block_number: u64) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+async fn get_timestamp_by_block_number(provider: Arc<Provider<Http>>, block_number: u64) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     let block = provider.get_block(U64::from(block_number)).await?.ok_or("Block not found")?;
     Ok(block.timestamp.as_u64())
 }
+
+// async fn get_recent_price_ratio(
+//     provider: Arc<Provider<Http>>,
+//     pool_address: Address,
+//     start_timestamp: u64,
+//     end_timestamp: u64,
+// ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+//     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
+//     let mut logs = Vec::new();
+//     let mut current_block_number = start_block_number;
+//     while current_block_number <= end_block_number {
+//         let next_block_number = min(current_block_number + BATCH_SIZE, end_block_number);
+//         let filter = Filter::new()
+//             .address(pool_address)
+//             .from_block(current_block_number)
+//             .to_block(next_block_number)
+//             .topic0(H256::from_str(SWAP_EVENT_SIGNATURE).unwrap());
+//         let block_logs = provider.get_logs(&filter).await?;
+//         logs.extend(block_logs);
+//         current_block_number = next_block_number + 1;
+//     }
+
+
+// }
+
 
 #[pymodule]
 fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -926,7 +962,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_get_token_info() {
-        let token_address = "0xc36442b4a4522e871399cd717abdd847ab11fe88";
+        let token_address = "0x0e84296da31b6c475afc1a991db05e79633e67b0";
         let rpc_url = "http://localhost:8545";
         let erc20_abi_json = include_str!("contracts/erc20_abi.json");
         let erc721_abi_json = include_str!("contracts/erc721_abi.json");
@@ -953,8 +989,6 @@ mod tests {
 
         let result = get_all_tokens(provider, start_timestamp, end_timestamp).await;
         assert!(result.is_ok());
-        let token_addresses = result.unwrap();
-        dbg!(token_addresses.len());
     }
 
     #[tokio::test]
@@ -980,8 +1014,6 @@ mod tests {
 
         let result = get_all_token_pairs(provider, start_timestamp, end_timestamp).await;
         assert!(result.is_ok());
-        let token_pairs = result.unwrap();
-        dbg!(token_pairs.len());
     }
 
     #[tokio::test]
@@ -991,9 +1023,7 @@ mod tests {
 
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
 
-        let result = get_timestamp_by_blocknumber(provider, block_number).await;
+        let result = get_timestamp_by_block_number(provider, block_number).await;
         assert!(result.is_ok());
-        let timestamp = result.unwrap();
-        dbg!(timestamp);
     }
 }
