@@ -809,6 +809,11 @@ async fn get_recent_pool_events(
     Ok(events)
 }
 
+async fn get_timestamp_by_blocknumber(provider: Arc<Provider<Http>>, block_number: u64) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let block = provider.get_block(U64::from(block_number)).await?.ok_or("Block not found")?;
+    Ok(block.timestamp.as_u64())
+}
+
 #[pymodule]
 fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<UniswapFetcher>()?;
@@ -977,5 +982,18 @@ mod tests {
         assert!(result.is_ok());
         let token_pairs = result.unwrap();
         dbg!(token_pairs.len());
+    }
+
+    #[tokio::test]
+    async fn test_get_timestamp_by_blocknumber() {
+        let block_number = 12376933;
+        let rpc_url = "http://localhost:8545";
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+
+        let result = get_timestamp_by_blocknumber(provider, block_number).await;
+        assert!(result.is_ok());
+        let timestamp = result.unwrap();
+        dbg!(timestamp);
     }
 }
