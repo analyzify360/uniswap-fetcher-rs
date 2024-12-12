@@ -298,7 +298,7 @@ class UniswapFetcher:
         Get pool price ratios by pool address.
         
         Returns:
-            Dict: JSON object containing the pool price ratios.
+            List: List of pool price ratios.
             [
                 {
                     "timestamp": int,
