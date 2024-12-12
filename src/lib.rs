@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use tokio::runtime::Runtime;
 use chrono::Utc;
-use ethers::{abi::Abi, contract::Contract, providers:: { Http, Middleware, Provider}, types::Address};
+use ethers::{abi::{token, Abi}, contract::Contract, providers:: { Http, Middleware, Provider}, types::Address};
 use serde::{Deserialize, Serialize};
 use sha2::{ Digest, Sha256};
 use std::{collections::HashSet, sync::Arc};
@@ -31,7 +31,6 @@ const SWAP_EVENT_SIGNATURE: &str = "c42079f94a6350d7e6235f29174924f928cc2ac818eb
 const MINT_EVENT_SIGNATURE: &str = "7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde";
 const BURN_EVENT_SIGNATURE: &str = "0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c";
 const COLLECT_EVENT_SIGNATURE: &str = "70935338e69775456a85ddef226c395fb668b63fa0115f5f20610b388e6ca9c0";
-
 struct PyValue(Value);
 
 impl IntoPy<PyObject> for PyValue {
@@ -287,6 +286,19 @@ impl UniswapFetcher {
     
 }
 
+fn get_pool_abi() -> Abi {
+    let abi_json = include_str!("contracts/uniswap_pool_abi.json");
+    serde_json::from_str(abi_json).unwrap()
+}
+
+fn get_token_abis() -> Vec<(String, Abi)> {
+    let erc20_abi: Abi = serde_json::from_str(include_str!("contracts/erc20_abi.json")).unwrap();
+    let erc721_abi: Abi = serde_json::from_str(include_str!("contracts/erc721_abi.json")).unwrap();
+    let dstoken_abi: Abi = serde_json::from_str(include_str!("contracts/dstoken_abi.json")).unwrap();
+    vec![("erc20".to_string(), erc20_abi), ("erc721".to_string(), erc721_abi), ("dstoken".to_string(), dstoken_abi)]
+}
+
+
 async fn get_pool_address(provider: Arc<Provider<Http>>, factory_address: Address, token0: Address, token1: Address, fee: u32) -> Result<Address, Box<dyn std::error::Error + Send + Sync>> {
     // Load the Uniswap V3 factory ABI
     let abi_json = include_str!("contracts/uniswap_pool_factory_abi.json");
@@ -528,12 +540,9 @@ async fn get_pool_created_events_between_two_timestamps(
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
     let mut current_block_number = start_block_number;
     let mut logs = Vec::new();
-    let erc20_abi_json = include_str!("contracts/erc20_abi.json");
-    let erc721_abi_json = include_str!("contracts/erc721_abi.json");
-    let dstoken_abi_json = include_str!("contracts/dstoken_abi.json");
-    let erc20_abi: Abi = serde_json::from_str(erc20_abi_json)?;
-    let erc721_abi: Abi = serde_json::from_str(erc721_abi_json)?;
-    let dstoken_abi: Abi = serde_json::from_str(dstoken_abi_json)?;
+    let erc20_abi: Abi = serde_json::from_str(include_str!("contracts/erc20_abi.json"))?;
+    let erc721_abi: Abi = serde_json::from_str(include_str!("contracts/erc721_abi.json"))?;
+    let dstoken_abi: Abi = serde_json::from_str(include_str!("contracts/dstoken_abi.json"))?;
     let abis: Vec<(String, Abi)> = vec![("erc20".to_string(), erc20_abi), ("erc721".to_string(), erc721_abi), ("dstoken".to_string(), dstoken_abi)];
 
     while current_block_number <= end_block_number {
@@ -847,6 +856,14 @@ async fn get_recent_price_ratio(
     block_cache: Arc<Mutex<HashMap<u64, u64>>>,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
+
+    let pool_abi = get_pool_abi();
+    let token_abis = get_token_abis();
+
+    let (token0, token1, _, _) = get_pool_info(provider.clone(), pool_address, pool_abi.clone()).await?;
+
+    let (_, _, token0_decimals) = get_token_info(provider.clone(), token0, token_abis.clone()).await?;
+    let (_, _, token1_decimals) = get_token_info(provider.clone(), token1, token_abis.clone()).await?;
     let mut logs = Vec::new();
     let mut current_block_number = start_block_number;
     while current_block_number <= end_block_number {
