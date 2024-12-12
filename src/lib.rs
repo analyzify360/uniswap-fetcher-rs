@@ -959,6 +959,11 @@ async fn get_pool_price_ratios(
         }
         current_price_ratio = item["price_ratio"].as_f64().unwrap();
     }
+    // change price_ratio type to string
+    for item in result.iter_mut() {
+        let price_ratio = item["price_ratio"].as_f64().unwrap().to_string();
+        item.as_object_mut().unwrap().insert("price_ratio".to_string(), serde_json::Value::String(price_ratio));
+    }
     Ok(result)
 
 }
