@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use tokio::runtime::Runtime;
 use chrono::Utc;
-use ethers::{abi::{token, Abi}, contract::Contract, providers:: { Http, Middleware, Provider}, types::Address};
+use ethers::{abi::Abi, contract::Contract, providers:: { Http, Middleware, Provider}, types::Address};
 use serde::{Deserialize, Serialize};
 use sha2::{ Digest, Sha256};
 use std::{collections::HashSet, sync::Arc};
@@ -279,6 +279,14 @@ impl UniswapFetcher {
     fn get_timestamp_by_block_number(&self, py: Python, block_number: u64) -> PyResult<PyObject> {
         let rt = Runtime::new().unwrap();
         match rt.block_on(get_timestamp_by_block_number(self.provider.clone(), block_number)) {
+            Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    fn get_pool_price_ratios(&self, py: Python, pool_address: String, start_timestamp: u64, end_timestamp: u64, interval: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_pool_price_ratios(self.provider.clone(), Address::from_str(&pool_address).unwrap(), start_timestamp, end_timestamp, interval, self.block_cache.clone())) {
             Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
             Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
         }
@@ -847,7 +855,7 @@ async fn get_pool_info(
     Ok((token0, token1, fee, tick_spacing))
 }
 
-async fn get_recent_price_ratio(
+async fn get_pool_price_ratios(
     provider: Arc<Provider<Http>>,
     pool_address: Address,
     start_timestamp: u64,
@@ -1147,7 +1155,7 @@ mod tests {
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
         let pool_address = Address::from_str(pool_address).unwrap();
 
-        let result = get_recent_price_ratio(provider, pool_address, start_timestamp, end_timestamp, interval, block_cache).await;
+        let result = get_pool_price_ratios(provider, pool_address, start_timestamp, end_timestamp, interval, block_cache).await;
         assert!(result.is_ok());
         let values = result.unwrap();
         dbg!(values);
