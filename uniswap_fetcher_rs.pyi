@@ -293,7 +293,7 @@ class UniswapFetcher:
         start_timestamp: int,
         end_timestamp: int,
         interval: int,
-    ) -> List[Dict[str, Union[int, float]]]:
+    ) -> List[Dict[str, Union[int, str]]]:
         """
         Get pool price ratios by pool address.
         
@@ -302,7 +302,7 @@ class UniswapFetcher:
             [
                 {
                     "timestamp": int,
-                    "price_ratio": float
+                    "price_ratio": str
                 },
                 ...
             ]
