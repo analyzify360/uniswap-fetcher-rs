@@ -905,7 +905,9 @@ async fn get_recent_price_ratio(
         if log.topics[0] == H256::from_str(SWAP_EVENT_SIGNATURE).unwrap() {
             let swap_event = <SwapEvent as EthLogDecode>::decode_log(&raw_log)?;
             let sqrt_price = ( swap_event.sqrt_price_x96 / 2u128.pow(96) ).as_u128() as f64;
-            let price_ratio = sqrt_price * sqrt_price;
+            let token0_decimals = token0_decimals.as_u64().unwrap();
+            let token1_decimals = token1_decimals.as_u64().unwrap();
+            let price_ratio = sqrt_price * sqrt_price * 10u128.pow(token0_decimals as u32) as f64 / 10u128.pow(token1_decimals as u32) as f64;
             
             price_ratios.insert(aggregated_timestamp, price_ratio);
         }
@@ -917,10 +919,39 @@ async fn get_recent_price_ratio(
         })
     }).collect();
     result.sort_by(|a, b| a["timestamp"].as_u64().cmp(&b["timestamp"].as_u64()));
-
+    let mut current_price_ratio = 0.0;
+    if result.len() > 0 {
+        if result[0]["price_ratio"].as_f64().unwrap() == 0.0 {
+            let filter = Filter::new()
+            .address(pool_address)
+            .from_block(start_block_number - BATCH_SIZE)
+            .to_block(start_block_number)
+            .topic0(H256::from_str(SWAP_EVENT_SIGNATURE).unwrap());
+            let block_logs = provider.get_logs(&filter).await?;
+            for block_log in block_logs {
+                let raw_log = RawLog {
+                    topics: block_log.topics.clone(),
+                    data: block_log.data.to_vec(),
+                };
+                if block_log.topics[0] == H256::from_str(SWAP_EVENT_SIGNATURE).unwrap() {
+                    let swap_event = <SwapEvent as EthLogDecode>::decode_log(&raw_log)?;
+                    let sqrt_price = ( swap_event.sqrt_price_x96 / 2u128.pow(96) ).as_u128() as f64;
+                    let token0_decimals = token0_decimals.as_u64().unwrap();
+                    let token1_decimals = token1_decimals.as_u64().unwrap();
+                    let price_ratio = sqrt_price * sqrt_price * 10u128.pow(token0_decimals as u32) as f64 / 10u128.pow(token1_decimals as u32) as f64;
+                    current_price_ratio = price_ratio;
+                    break;
+                }
+            }
+        }
+    }
+    for item in result.iter_mut() {
+        if item["price_ratio"].as_f64().unwrap() == 0.0 {
+            item.as_object_mut().unwrap().insert("price_ratio".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(current_price_ratio).unwrap()));
+        }
+        current_price_ratio = item["price_ratio"].as_f64().unwrap();
+    }
     Ok(result)
-
-
 
 }
 
