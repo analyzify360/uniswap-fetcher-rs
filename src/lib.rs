@@ -825,29 +825,74 @@ async fn get_timestamp_by_block_number(provider: Arc<Provider<Http>>, block_numb
     Ok(block.timestamp.as_u64())
 }
 
-// async fn get_recent_price_ratio(
-//     provider: Arc<Provider<Http>>,
-//     pool_address: Address,
-//     start_timestamp: u64,
-//     end_timestamp: u64,
-// ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
-//     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
-//     let mut logs = Vec::new();
-//     let mut current_block_number = start_block_number;
-//     while current_block_number <= end_block_number {
-//         let next_block_number = min(current_block_number + BATCH_SIZE, end_block_number);
-//         let filter = Filter::new()
-//             .address(pool_address)
-//             .from_block(current_block_number)
-//             .to_block(next_block_number)
-//             .topic0(H256::from_str(SWAP_EVENT_SIGNATURE).unwrap());
-//         let block_logs = provider.get_logs(&filter).await?;
-//         logs.extend(block_logs);
-//         current_block_number = next_block_number + 1;
-//     }
+async fn get_recent_price_ratio(
+    provider: Arc<Provider<Http>>,
+    pool_address: Address,
+    start_timestamp: u64,
+    end_timestamp: u64,
+    interval: u64,
+    block_cache: Arc<Mutex<HashMap<u64, u64>>>,
+) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
+    let mut logs = Vec::new();
+    let mut current_block_number = start_block_number;
+    while current_block_number <= end_block_number {
+        let next_block_number = min(current_block_number + BATCH_SIZE, end_block_number);
+        let filter = Filter::new()
+            .address(pool_address)
+            .from_block(current_block_number)
+            .to_block(next_block_number)
+            .topic0(H256::from_str(SWAP_EVENT_SIGNATURE).unwrap());
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
+
+    let mut price_ratios = HashMap::new();
+    // initialize the price ratios with the timestamps between start_timestamp and end_timestamp
+    let mut timestamp = (start_timestamp + interval) / interval * interval;
+    while timestamp <= end_timestamp {
+        price_ratios.insert(timestamp, 0.0);
+        timestamp = timestamp + interval;
+    }
+    for log in logs {
+        let raw_log = RawLog {
+            topics: log.topics.clone(),
+            data: log.data.to_vec(),
+        };
+        let timestamp = {
+            let mut cache = block_cache.lock().await;
+            if let Some(&cached_timestamp) = cache.get(&log.block_number.unwrap().as_u64()) {
+                cached_timestamp
+            } else {
+                let block = provider.get_block(log.block_number.unwrap()).await?.ok_or("Block not found")?;
+                let timestamp = block.timestamp.as_u64();
+                cache.insert(log.block_number.unwrap().as_u64(), timestamp);
+                timestamp
+            }
+        };
+        let aggregated_timestamp = (timestamp + interval) / interval * interval;
+        if log.topics[0] == H256::from_str(SWAP_EVENT_SIGNATURE).unwrap() {
+            let swap_event = <SwapEvent as EthLogDecode>::decode_log(&raw_log)?;
+            let sqrt_price = ( swap_event.sqrt_price_x96 / 2u128.pow(96) ).as_u128() as f64;
+            let price_ratio = sqrt_price * sqrt_price;
+            
+            price_ratios.insert(aggregated_timestamp, price_ratio);
+        }
+    }
+    let mut result: Vec<Value> = price_ratios.iter().map(|(timestamp, price_ratio)| {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "price_ratio": price_ratio,
+        })
+    }).collect();
+    result.sort_by(|a, b| a["timestamp"].as_u64().cmp(&b["timestamp"].as_u64()));
+
+    Ok(result)
 
 
-// }
+
+}
 
 
 #[pymodule]
@@ -937,14 +982,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_block_number_range() {
-        let start_timestamp = 1633046400; // 2021-10-01 00:00:00 UTC
-        let end_timestamp = 1633132800; // 2021-10-02 00:00:00 UTC
+        let start_timestamp = 1620086400; // 2021-10-01 00:00:00 UTC
+        let end_timestamp = 1620172800; // 2021-10-02 00:00:00 UTC
         let rpc_url = "http://localhost:8545";
 
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
 
         let result = get_block_number_range(provider, start_timestamp, end_timestamp).await;
         assert!(result.is_ok());
+        let (start_block_number, end_block_number) = result.unwrap();
+        dbg!(start_block_number, end_block_number);
     }
 
     #[tokio::test]
@@ -1026,4 +1073,23 @@ mod tests {
         let result = get_timestamp_by_block_number(provider, block_number).await;
         assert!(result.is_ok());
     }
+
+    #[tokio::test]
+    async fn test_get_recent_price_ratio() {
+        let pool_address = "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8";
+        let start_timestamp = 1733875210; // 2021-10-08 00:00:00 UTC
+        let end_timestamp = 1733877000; // 2021-10-08 01:00:00 UTC
+        let interval = 300; // 5-min in seconds
+        let rpc_url = "http://localhost:8545";
+        let block_cache = Arc::new(Mutex::new(HashMap::new()));
+        
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+        let pool_address = Address::from_str(pool_address).unwrap();
+
+        let result = get_recent_price_ratio(provider, pool_address, start_timestamp, end_timestamp, interval, block_cache).await;
+        assert!(result.is_ok());
+        let values = result.unwrap();
+        dbg!(values);
+    }
+
 }
