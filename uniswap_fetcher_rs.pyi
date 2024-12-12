@@ -287,3 +287,25 @@ class UniswapFetcher:
         """
         ...
     
+    def get_pool_price_ratios(
+        self,
+        pool_address: str,
+        start_timestamp: int,
+        end_timestamp: int,
+        interval: int,
+    ) -> List[Dict[str, Union[int, str]]]:
+        """
+        Get pool price ratios by pool address.
+        
+        Returns:
+            List: List of pool price ratios.
+            [
+                {
+                    "timestamp": int,
+                    "price_ratio": str
+                },
+                ...
+            ]
+        """
+        ...
+    

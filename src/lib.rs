@@ -31,7 +31,6 @@ const SWAP_EVENT_SIGNATURE: &str = "c42079f94a6350d7e6235f29174924f928cc2ac818eb
 const MINT_EVENT_SIGNATURE: &str = "7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde";
 const BURN_EVENT_SIGNATURE: &str = "0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c";
 const COLLECT_EVENT_SIGNATURE: &str = "70935338e69775456a85ddef226c395fb668b63fa0115f5f20610b388e6ca9c0";
-
 struct PyValue(Value);
 
 impl IntoPy<PyObject> for PyValue {
@@ -276,8 +275,37 @@ impl UniswapFetcher {
             Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
         }
     }
+
+    fn get_timestamp_by_block_number(&self, py: Python, block_number: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_timestamp_by_block_number(self.provider.clone(), block_number)) {
+            Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    fn get_pool_price_ratios(&self, py: Python, pool_address: String, start_timestamp: u64, end_timestamp: u64, interval: u64) -> PyResult<PyObject> {
+        let rt = Runtime::new().unwrap();
+        match rt.block_on(get_pool_price_ratios(self.provider.clone(), Address::from_str(&pool_address).unwrap(), start_timestamp, end_timestamp, interval, self.block_cache.clone())) {
+            Ok(result) => Ok(PyValue(serde_json::json!(result)).into_py(py)),
+            Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+        }
+    }
     
 }
+
+fn get_pool_abi() -> Abi {
+    let abi_json = include_str!("contracts/uniswap_pool_abi.json");
+    serde_json::from_str(abi_json).unwrap()
+}
+
+fn get_token_abis() -> Vec<(String, Abi)> {
+    let erc20_abi: Abi = serde_json::from_str(include_str!("contracts/erc20_abi.json")).unwrap();
+    let erc721_abi: Abi = serde_json::from_str(include_str!("contracts/erc721_abi.json")).unwrap();
+    let dstoken_abi: Abi = serde_json::from_str(include_str!("contracts/dstoken_abi.json")).unwrap();
+    vec![("erc20".to_string(), erc20_abi), ("erc721".to_string(), erc721_abi), ("dstoken".to_string(), dstoken_abi)]
+}
+
 
 async fn get_pool_address(provider: Arc<Provider<Http>>, factory_address: Address, token0: Address, token1: Address, fee: u32) -> Result<Address, Box<dyn std::error::Error + Send + Sync>> {
     // Load the Uniswap V3 factory ABI
@@ -520,12 +548,9 @@ async fn get_pool_created_events_between_two_timestamps(
     let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
     let mut current_block_number = start_block_number;
     let mut logs = Vec::new();
-    let erc20_abi_json = include_str!("contracts/erc20_abi.json");
-    let erc721_abi_json = include_str!("contracts/erc721_abi.json");
-    let dstoken_abi_json = include_str!("contracts/dstoken_abi.json");
-    let erc20_abi: Abi = serde_json::from_str(erc20_abi_json)?;
-    let erc721_abi: Abi = serde_json::from_str(erc721_abi_json)?;
-    let dstoken_abi: Abi = serde_json::from_str(dstoken_abi_json)?;
+    let erc20_abi: Abi = serde_json::from_str(include_str!("contracts/erc20_abi.json"))?;
+    let erc721_abi: Abi = serde_json::from_str(include_str!("contracts/erc721_abi.json"))?;
+    let dstoken_abi: Abi = serde_json::from_str(include_str!("contracts/dstoken_abi.json"))?;
     let abis: Vec<(String, Abi)> = vec![("erc20".to_string(), erc20_abi), ("erc721".to_string(), erc721_abi), ("dstoken".to_string(), dstoken_abi)];
 
     while current_block_number <= end_block_number {
@@ -536,7 +561,6 @@ async fn get_pool_created_events_between_two_timestamps(
             .from_block(current_block_number)
             .to_block(next_block_number);
         let block_logs = provider.get_logs(&filter).await?;
-        println!("{} | Fetched pool created events from block: {:?} to block: {:?}", Utc::now(), current_block_number, next_block_number);
         logs.extend(block_logs);
         current_block_number = next_block_number + 1;
     }
@@ -670,14 +694,20 @@ async fn get_token_info(provider: Arc<Provider<Http>>, token_address: Address, a
             let symbol: Result<String, _> = contract.method::<(), String>("symbol", ())?.call().await;
             let decimals: Result<u8, _> = contract.method::<(), u8>("decimals", ())?.call().await;
             match (name, symbol, decimals) {
-                (Ok(name), Ok(symbol), Ok(decimals)) => return Ok((name, symbol, decimals.into())),
+                (Ok(name), Ok(symbol), Ok(decimals)) => return Ok((
+                    name.trim_end_matches('\0').to_string(),
+                    symbol.trim_end_matches('\0').to_string(),
+                    decimals.into())),
                 _ => continue,
             }
         } else if contract_type == "erc721" {
             let name: Result<String, _> = contract.method::<(), String>("name", ())?.call().await;
             let symbol: Result<String, _> = contract.method::<(), String>("symbol", ())?.call().await;
             match (name, symbol) {
-                (Ok(name), Ok(symbol)) => return Ok((name, symbol, 1.into())),
+                (Ok(name), Ok(symbol)) => return Ok((
+                    name.trim_end_matches('\0').to_string(),
+                    symbol.trim_end_matches('\0').to_string(),
+                    1.into())),
                 _ => continue,
             }
         } else if contract_type == "dstoken" {
@@ -755,7 +785,6 @@ async fn get_all_tokens(
             .to_block(next_block_number);
         let block_logs = provider.get_logs(&filter).await?;
         logs.extend(block_logs);
-        println!("{} | Fetched all tokens from block {} to block {} ({}%)", Utc::now(),current_block_number, next_block_number, (next_block_number - start_block_number) * 100 / (end_block_number - start_block_number));
         current_block_number = next_block_number + 1;
     }
 
@@ -800,7 +829,6 @@ async fn get_recent_pool_events(
                 H256::from_str(COLLECT_EVENT_SIGNATURE).unwrap(),
             ]);
         let block_logs = provider.get_logs(&filter).await?;
-        println!("{} | Fetched logs from block {} to block {} ({}%)", Utc::now(), current_block_number, next_block_number, (next_block_number - start_block_number) * 100 / (end_block_number - start_block_number));
         logs.extend(block_logs);
         current_block_number = next_block_number + 1;
     }
@@ -808,6 +836,138 @@ async fn get_recent_pool_events(
     println!("{} | Completed fetching recent pool events for pool {} starting from timestamp {}", Utc::now(), pool_address, start_timestamp);
     Ok(events)
 }
+
+async fn get_timestamp_by_block_number(provider: Arc<Provider<Http>>, block_number: u64) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let block = provider.get_block(U64::from(block_number)).await?.ok_or("Block not found")?;
+    Ok(block.timestamp.as_u64())
+}
+
+async fn get_pool_info(
+    provider: Arc<Provider<Http>>,
+    pool_address: Address,
+    pool_abi: Abi,
+) -> Result<(Address, Address, u32, i32), Box<dyn std::error::Error + Send + Sync>> {
+    let pool_contract = Contract::new(pool_address, pool_abi.clone(), provider.clone());
+    let token0: Address = pool_contract.method::<(), Address>("token0", ())?.call().await?;
+    let token1: Address = pool_contract.method::<(), Address>("token1", ())?.call().await?;
+    let fee: u32 = pool_contract.method::<(), u32>("fee", ())?.call().await?;
+    let tick_spacing: i32 = pool_contract.method::<(), i32>("tickSpacing", ())?.call().await?;
+    Ok((token0, token1, fee, tick_spacing))
+}
+
+async fn get_pool_price_ratios(
+    provider: Arc<Provider<Http>>,
+    pool_address: Address,
+    start_timestamp: u64,
+    end_timestamp: u64,
+    interval: u64,
+    block_cache: Arc<Mutex<HashMap<u64, u64>>>,
+) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    let (start_block_number, end_block_number) = get_block_number_range(provider.clone(), start_timestamp, end_timestamp).await?;
+
+    let pool_abi = get_pool_abi();
+    let token_abis = get_token_abis();
+
+    let (token0, token1, _, _) = get_pool_info(provider.clone(), pool_address, pool_abi.clone()).await?;
+
+    let (_, _, token0_decimals) = get_token_info(provider.clone(), token0, token_abis.clone()).await?;
+    let (_, _, token1_decimals) = get_token_info(provider.clone(), token1, token_abis.clone()).await?;
+    let mut logs = Vec::new();
+    let mut current_block_number = start_block_number;
+    while current_block_number <= end_block_number {
+        let next_block_number = min(current_block_number + BATCH_SIZE, end_block_number);
+        let filter = Filter::new()
+            .address(pool_address)
+            .from_block(current_block_number)
+            .to_block(next_block_number)
+            .topic0(H256::from_str(SWAP_EVENT_SIGNATURE).unwrap());
+        let block_logs = provider.get_logs(&filter).await?;
+        logs.extend(block_logs);
+        current_block_number = next_block_number + 1;
+    }
+
+    let mut price_ratios = HashMap::new();
+    // initialize the price ratios with the timestamps between start_timestamp and end_timestamp
+    let mut timestamp = (start_timestamp + interval) / interval * interval;
+    while timestamp <= end_timestamp {
+        price_ratios.insert(timestamp, 0.0);
+        timestamp = timestamp + interval;
+    }
+    for log in logs {
+        let raw_log = RawLog {
+            topics: log.topics.clone(),
+            data: log.data.to_vec(),
+        };
+        let timestamp = {
+            let mut cache = block_cache.lock().await;
+            if let Some(&cached_timestamp) = cache.get(&log.block_number.unwrap().as_u64()) {
+                cached_timestamp
+            } else {
+                let block = provider.get_block(log.block_number.unwrap()).await?.ok_or("Block not found")?;
+                let timestamp = block.timestamp.as_u64();
+                cache.insert(log.block_number.unwrap().as_u64(), timestamp);
+                timestamp
+            }
+        };
+        let aggregated_timestamp = (timestamp + interval) / interval * interval;
+        if log.topics[0] == H256::from_str(SWAP_EVENT_SIGNATURE).unwrap() {
+            let swap_event = <SwapEvent as EthLogDecode>::decode_log(&raw_log)?;
+            let sqrt_price = ( swap_event.sqrt_price_x96 / 2u128.pow(96) ).as_u128() as f64;
+            let token0_decimals = token0_decimals.as_u64().unwrap();
+            let token1_decimals = token1_decimals.as_u64().unwrap();
+            let price_ratio = sqrt_price * sqrt_price * 10u128.pow(token0_decimals as u32) as f64 / 10u128.pow(token1_decimals as u32) as f64;
+            
+            price_ratios.insert(aggregated_timestamp, price_ratio);
+        }
+    }
+    let mut result: Vec<Value> = price_ratios.iter().map(|(timestamp, price_ratio)| {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "price_ratio": price_ratio,
+        })
+    }).collect();
+    result.sort_by(|a, b| a["timestamp"].as_u64().cmp(&b["timestamp"].as_u64()));
+    let mut current_price_ratio = 0.0;
+    if result.len() > 0 {
+        if result[0]["price_ratio"].as_f64().unwrap() == 0.0 {
+            let filter = Filter::new()
+            .address(pool_address)
+            .from_block(start_block_number - BATCH_SIZE)
+            .to_block(start_block_number)
+            .topic0(H256::from_str(SWAP_EVENT_SIGNATURE).unwrap());
+            let block_logs = provider.get_logs(&filter).await?;
+            for block_log in block_logs {
+                let raw_log = RawLog {
+                    topics: block_log.topics.clone(),
+                    data: block_log.data.to_vec(),
+                };
+                if block_log.topics[0] == H256::from_str(SWAP_EVENT_SIGNATURE).unwrap() {
+                    let swap_event = <SwapEvent as EthLogDecode>::decode_log(&raw_log)?;
+                    let sqrt_price = ( swap_event.sqrt_price_x96 / 2u128.pow(96) ).as_u128() as f64;
+                    let token0_decimals = token0_decimals.as_u64().unwrap();
+                    let token1_decimals = token1_decimals.as_u64().unwrap();
+                    let price_ratio = sqrt_price * sqrt_price * 10u128.pow(token0_decimals as u32) as f64 / 10u128.pow(token1_decimals as u32) as f64;
+                    current_price_ratio = price_ratio;
+                    break;
+                }
+            }
+        }
+    }
+    for item in result.iter_mut() {
+        if item["price_ratio"].as_f64().unwrap() == 0.0 {
+            item.as_object_mut().unwrap().insert("price_ratio".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(current_price_ratio).unwrap()));
+        }
+        current_price_ratio = item["price_ratio"].as_f64().unwrap();
+    }
+    // change price_ratio type to string
+    for item in result.iter_mut() {
+        let price_ratio = item["price_ratio"].as_f64().unwrap().to_string();
+        item.as_object_mut().unwrap().insert("price_ratio".to_string(), serde_json::Value::String(price_ratio));
+    }
+    Ok(result)
+
+}
+
 
 #[pymodule]
 fn uniswap_fetcher_rs(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -896,14 +1056,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_block_number_range() {
-        let start_timestamp = 1633046400; // 2021-10-01 00:00:00 UTC
-        let end_timestamp = 1633132800; // 2021-10-02 00:00:00 UTC
+        let start_timestamp = 1620086400; // 2021-10-01 00:00:00 UTC
+        let end_timestamp = 1620172800; // 2021-10-02 00:00:00 UTC
         let rpc_url = "http://localhost:8545";
 
         let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
 
         let result = get_block_number_range(provider, start_timestamp, end_timestamp).await;
         assert!(result.is_ok());
+        let (start_block_number, end_block_number) = result.unwrap();
+        dbg!(start_block_number, end_block_number);
     }
 
     #[tokio::test]
@@ -921,7 +1083,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_get_token_info() {
-        let token_address = "0xc36442b4a4522e871399cd717abdd847ab11fe88";
+        let token_address = "0x0e84296da31b6c475afc1a991db05e79633e67b0";
         let rpc_url = "http://localhost:8545";
         let erc20_abi_json = include_str!("contracts/erc20_abi.json");
         let erc721_abi_json = include_str!("contracts/erc721_abi.json");
@@ -948,8 +1110,6 @@ mod tests {
 
         let result = get_all_tokens(provider, start_timestamp, end_timestamp).await;
         assert!(result.is_ok());
-        let token_addresses = result.unwrap();
-        dbg!(token_addresses.len());
     }
 
     #[tokio::test]
@@ -975,7 +1135,35 @@ mod tests {
 
         let result = get_all_token_pairs(provider, start_timestamp, end_timestamp).await;
         assert!(result.is_ok());
-        let token_pairs = result.unwrap();
-        dbg!(token_pairs.len());
     }
+
+    #[tokio::test]
+    async fn test_get_timestamp_by_blocknumber() {
+        let block_number = 12376933;
+        let rpc_url = "http://localhost:8545";
+
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+
+        let result = get_timestamp_by_block_number(provider, block_number).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_recent_price_ratio() {
+        let pool_address = "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8";
+        let start_timestamp = 1733875210; // 2021-10-08 00:00:00 UTC
+        let end_timestamp = 1733877000; // 2021-10-08 01:00:00 UTC
+        let interval = 300; // 5-min in seconds
+        let rpc_url = "http://localhost:8545";
+        let block_cache = Arc::new(Mutex::new(HashMap::new()));
+        
+        let provider = Arc::new(Provider::<Http>::try_from(rpc_url).unwrap());
+        let pool_address = Address::from_str(pool_address).unwrap();
+
+        let result = get_pool_price_ratios(provider, pool_address, start_timestamp, end_timestamp, interval, block_cache).await;
+        assert!(result.is_ok());
+        let values = result.unwrap();
+        dbg!(values);
+    }
+
 }
