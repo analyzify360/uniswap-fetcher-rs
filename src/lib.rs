@@ -825,6 +825,19 @@ async fn get_timestamp_by_block_number(provider: Arc<Provider<Http>>, block_numb
     Ok(block.timestamp.as_u64())
 }
 
+async fn get_pool_info(
+    provider: Arc<Provider<Http>>,
+    pool_address: Address,
+    pool_abi: Abi,
+) -> Result<(Address, Address, u32, i32), Box<dyn std::error::Error + Send + Sync>> {
+    let pool_contract = Contract::new(pool_address, pool_abi.clone(), provider.clone());
+    let token0: Address = pool_contract.method::<(), Address>("token0", ())?.call().await?;
+    let token1: Address = pool_contract.method::<(), Address>("token1", ())?.call().await?;
+    let fee: u32 = pool_contract.method::<(), u32>("fee", ())?.call().await?;
+    let tick_spacing: i32 = pool_contract.method::<(), i32>("tickSpacing", ())?.call().await?;
+    Ok((token0, token1, fee, tick_spacing))
+}
+
 async fn get_recent_price_ratio(
     provider: Arc<Provider<Http>>,
     pool_address: Address,
